@@ -1,0 +1,323 @@
+name: Release
+
+# Fires only on version tags. Nothing here runs on a branch push or PR --
+# tagging is the one deliberate gate before a release build even starts.
+on:
+  push:
+    tags:
+      - "v*"
+
+# Least privilege by default; the one job that needs to create a release
+# escalates its own permissions block below.
+permissions:
+  contents: read
+
+jobs:
+  build-macos:
+    name: Build macOS (universal)
+    runs-on: macos-14
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Derive version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Configure (universal arm64+x86_64)
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUNIVERSAL_BINARY=ON \
+            -DWAREHOUSE_INSTALL_AFTER_BUILD=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      # Same reasoning as ci.yml's test steps: these binaries return non-zero
+      # on any suite failure. A release built on a broken tree is worse than
+      # no release, so this fails the tag build rather than ship it.
+      - name: Run tests
+        run: |
+          ./build/WarehouseTests_artefacts/Release/WarehouseTests
+          ./build/WarehouseProcessorTests_artefacts/Release/WarehouseProcessorTests
+          ./build/WarehouseVst3Check_artefacts/Release/WarehouseVst3Check \
+            "$(pwd)/build/Warehouse_artefacts/Release/VST3/Warehouse.vst3"
+
+      - name: Build .pkg
+        run: |
+          if [ ! -x packaging/build-pkg.sh ]; then
+            echo "::error::packaging/build-pkg.sh not found (or not executable)." \
+                 " The macOS packaging assignment has not landed in this tree yet -- cannot produce the .pkg."
+            exit 1
+          fi
+
+          OUT_DIR="$RUNNER_TEMP/pkg-out"
+          mkdir -p "$OUT_DIR"
+          packaging/build-pkg.sh build "${{ steps.version.outputs.version }}" "$OUT_DIR"
+
+          # Copy to the exact filename this workflow attaches to the release,
+          # rather than assuming build-pkg.sh already names its output that
+          # way -- that script is owned by a different, concurrently landing
+          # assignment.
+          PKG="$(find "$OUT_DIR" -maxdepth 1 -iname '*.pkg' | head -n1)"
+          if [ -z "$PKG" ]; then
+            echo "::error::packaging/build-pkg.sh produced no .pkg file in $OUT_DIR"
+            exit 1
+          fi
+          cp "$PKG" "Warehouse-${{ steps.version.outputs.version }}-macOS.pkg"
+
+      # "A .pkg exists" is not evidence the .pkg installs to the right place.
+      # An installer that puts the Audio Unit somewhere macOS does not scan is
+      # indistinguishable from a working one until a user reports the plugin is
+      # missing. This asserts the two install locations and both payload roots,
+      # which is the whole contract the installer has to satisfy.
+      - name: Verify the .pkg installs where the DAWs actually look
+        run: |
+          PKG="Warehouse-${{ steps.version.outputs.version }}-macOS.pkg"
+          EXP="$RUNNER_TEMP/pkg-verify"
+          rm -rf "$EXP"
+          pkgutil --expand "$PKG" "$EXP"
+
+          fail=0
+          check() {
+              if grep -q "install-location=\"$2\"" "$EXP/$1/PackageInfo"; then
+                  echo "ok   $1 -> $2"
+              else
+                  echo "::error::$1 does not declare install-location $2"
+                  echo "         actual: $(grep -o 'install-location="[^"]*"' "$EXP/$1/PackageInfo" || echo '(none)')"
+                  fail=1
+              fi
+          }
+          check au.pkg   /Library/Audio/Plug-Ins/Components
+          check vst3.pkg /Library/Audio/Plug-Ins/VST3
+
+          # Payload roots must be the bundles themselves, not a nested folder --
+          # pkgbuild --root semantics make that easy to get wrong by one level,
+          # and the result installs Components/some-dir/Warehouse.component.
+          for spec in "au.pkg:Warehouse.component" "vst3.pkg:Warehouse.vst3"; do
+              sub="${spec%%:*}"; want="${spec#*:}"
+              if cpio -t --quiet < "$EXP/$sub/Payload" 2>/dev/null | grep -qx "./$want"; then
+                  echo "ok   $sub payload root is $want"
+              else
+                  echo "::error::$sub payload root is not ./$want"
+                  cpio -t --quiet < "$EXP/$sub/Payload" 2>/dev/null | head -5
+                  fail=1
+              fi
+          done
+
+          exit $fail
+
+      - name: Zip AU + VST3
+        run: |
+          # The staging directory's own name becomes the folder the user sees
+          # when they double-click the zip, because of --keepParent below. So
+          # it is named for the product, not for the build step -- a zip that
+          # expands into "macos-zip-stage" looks broken.
+          NAME="Warehouse-${{ steps.version.outputs.version }}-macOS"
+          STAGE="$RUNNER_TEMP/$NAME"
+          mkdir -p "$STAGE"
+          cp -R build/Warehouse_artefacts/Release/AU/Warehouse.component "$STAGE/"
+          cp -R build/Warehouse_artefacts/Release/VST3/Warehouse.vst3 "$STAGE/"
+
+          # A README inside the zip: anyone taking the manual route skipped the
+          # installer, and therefore also skipped every instruction it shows.
+          cat > "$STAGE/INSTALL.txt" <<'TXT'
+          Warehouse -- manual installation (macOS)
+
+          Copy the two bundles to these exact folders, then restart your DAW:
+
+            Warehouse.component  ->  /Library/Audio/Plug-Ins/Components
+            Warehouse.vst3       ->  /Library/Audio/Plug-Ins/VST3
+
+          Use /Library, not ~/Library: FL Studio does not reliably scan the
+          user-level Components folder, so an Audio Unit placed there may never
+          appear in it.
+
+          If macOS blocks the bundles because they were downloaded, run:
+
+            xattr -dr com.apple.quarantine /Library/Audio/Plug-Ins/Components/Warehouse.component
+            xattr -dr com.apple.quarantine /Library/Audio/Plug-Ins/VST3/Warehouse.vst3
+
+          Logic caching an old scan? Quit Logic, run
+          `killall -9 AudioComponentRegistrar`, relaunch.
+
+          Warehouse is free software under the AGPLv3. The complete corresponding
+          source, the licence, and full instructions are at:
+
+            https://github.com/remicaesar/warehouse-reverb
+          TXT
+
+          # ditto, not zip: it is the Apple-recommended way to archive a
+          # codesigned bundle without the resource-fork / extended-attribute
+          # corruption plain `zip` can introduce.
+          ( cd "$RUNNER_TEMP" \
+            && ditto -c -k --sequesterRsrc --keepParent "$NAME" \
+                 "$GITHUB_WORKSPACE/$NAME.zip" )
+
+      - name: Upload macOS release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release-assets
+          path: |
+            Warehouse-*-macOS.pkg
+            Warehouse-*-macOS.zip
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows (x64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Derive version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $version = "${env:GITHUB_REF_NAME}" -replace '^v', ''
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -A x64 -DWAREHOUSE_INSTALL_AFTER_BUILD=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          & ".\build\WarehouseTests_artefacts\Release\WarehouseTests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ".\build\WarehouseProcessorTests_artefacts\Release\WarehouseProcessorTests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Inno Setup 6 (ISCC.exe) ships preinstalled on the windows-latest image
+      # via its own Chocolatey provisioning step -- verified against
+      # actions/runner-images' current Windows2025 toolset manifest, which
+      # lists `innosetup` under its common Chocolatey packages. No install
+      # step needed; `iscc` is already on PATH.
+      - name: Build installer (.exe) with Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "packaging\windows\installer.iss")) {
+            Write-Error "packaging\windows\installer.iss not found. The Windows packaging assignment has not landed in this tree yet -- cannot produce the installer."
+            exit 1
+          }
+
+          $outDir = "$env:RUNNER_TEMP\iss-out"
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+          $version = "${{ steps.version.outputs.version }}"
+          $outName = "Warehouse-$version-Windows"
+
+          # /O and /F override installer.iss's own OutputDir /
+          # OutputBaseFilename regardless of what that script sets internally,
+          # so the produced filename is deterministic without needing to know
+          # its contents. BuildDir/AppVersion are passed as extra /D defines
+          # on the chance installer.iss reads them for locating build output;
+          # ISCC ignores any define a script never references, so this is
+          # harmless if it does not.
+          iscc `
+            "/O$outDir" `
+            "/F$outName" `
+            "/DBuildDir=$PWD\build" `
+            "/DAppVersion=$version" `
+            "packaging\windows\installer.iss"
+
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          Copy-Item "$outDir\$outName.exe" ".\$outName.exe"
+
+      - name: Zip VST3
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $name = "Warehouse-$version-Windows"
+          $stage = "$env:RUNNER_TEMP\$name"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item -Recurse "build\Warehouse_artefacts\Release\VST3\Warehouse.vst3" $stage
+
+          # A README inside the zip: anyone taking the manual route skipped the
+          # installer, and therefore also skipped every instruction it shows.
+          @'
+          Warehouse -- manual installation (Windows)
+
+          Copy the Warehouse.vst3 FOLDER (it is a folder, not a single file) to:
+
+            C:\Program Files\Common Files\VST3
+
+          That exact path, nothing else. Steinberg's specification requires it and
+          FL Studio only guarantees to scan there.
+
+          Then restart your DAW and rescan:
+            Ableton Live  -- Preferences > Plug-Ins > Use VST3 Plug-in System
+                             Folder must be ON, then Rescan.
+            FL Studio     -- Options > Manage plugins > Find more plugins.
+
+          There is no Audio Unit on Windows; that format is macOS-only.
+
+          Warehouse is free software under the AGPLv3. The complete corresponding
+          source, the licence, and full instructions are at:
+
+            https://github.com/remicaesar/warehouse-reverb
+          '@ | Set-Content -Path "$stage\INSTALL.txt" -Encoding utf8
+
+          Compress-Archive -Path $stage -DestinationPath "$name.zip"
+
+      - name: Upload Windows release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-assets
+          path: |
+            Warehouse-*-Windows.exe
+            Warehouse-*-Windows.zip
+          if-no-files-found: error
+
+  publish-draft-release:
+    name: Create draft GitHub Release
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Draft, deliberately: nothing here should become publicly downloadable
+      # without a human reviewing it first. The plugin is unsigned by design
+      # (a stated cost decision elsewhere in this project), so this workflow
+      # adds no signing/notarisation step of its own.
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Idempotent: re-running a tag build (a transient runner failure, a
+          # re-run after fixing one leg) must not die at the last step having
+          # done all the work. `create` fails outright if a release for the tag
+          # already exists, so upload --clobber into the existing one instead.
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release for $GITHUB_REF_NAME already exists; replacing its assets."
+            gh release upload "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber \
+              dist/*.pkg dist/*.zip dist/*.exe
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --title "Warehouse ${GITHUB_REF_NAME#v}" \
+              --notes "Automated build from ${GITHUB_SHA}. Unsigned; review before publishing." \
+              dist/*.pkg dist/*.zip dist/*.exe
+          fi

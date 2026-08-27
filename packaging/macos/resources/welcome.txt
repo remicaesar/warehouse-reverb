@@ -1,0 +1,10 @@
+Warehouse
+
+A house-focused algorithmic reverb, packaged as an Audio Unit and a VST3
+plug-in for macOS.
+
+This installer places the plug-in formats you choose into the system-wide
+plug-in folders under /Library/Audio/Plug-Ins, so every DAW on this Mac can
+find them. That is why it asks for an administrator password.
+
+Click Continue to choose which formats to install.

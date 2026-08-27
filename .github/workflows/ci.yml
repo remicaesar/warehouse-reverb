@@ -1,0 +1,152 @@
+name: CI
+
+# branches: ["**"] rather than a bare `push:` -- a bare push trigger also
+# fires on tag refs, which would run this whole matrix a second time on every
+# `v*` tag (release.yml already covers tags, and builds them properly).
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    # fail-fast: false -- a Windows regression must not hide the macOS result
+    # (and vice versa). Two very different toolchains, two independent signals.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            name: macOS
+          - os: windows-latest
+            name: Windows
+
+    steps:
+      # libs/JUCE is a submodule. actions/checkout already runs
+      # `git submodule update --init --force --depth=1 --recursive` whenever
+      # fetch-depth is left at its default of 1, so `submodules: recursive`
+      # alone gives a shallow submodule fetch with no extra flags needed --
+      # the checkout is the expensive part of this job, and this is already
+      # the shallow path.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Compiler toolchain needs nothing installed on either runner:
+      # macos-14 ships Xcode + cmake, windows-latest ships Visual Studio + cmake.
+
+      # No compiler cache on either platform, deliberately.
+      #
+      # ccache was here for the macOS job and could never have worked: ccache
+      # cannot cache a compile carrying multiple -arch flags (it has to run the
+      # preprocessor explicitly, which fails with two -arch options, and it
+      # records the compile as `unsupported_compiler_option` -- see ccache 3.0's
+      # release notes). This job configures -DUNIVERSAL_BINARY=ON, so EVERY
+      # compile in it is a dual-arch compile and the hit rate would be ~0% while
+      # the cache grew and was never read.
+      #
+      # Universal stays and the cache goes, not the other way around: compiling
+      # the actually-shipped configuration on every push is worth far more than
+      # a cache, and turning universal off here would defer a universal-only
+      # compile failure to tag time, which is the worst moment to find it.
+      #
+      # sccache on Windows/MSVC needs a Ninja generator, which is a larger change
+      # than this workflow should make.
+
+      - name: Configure (macOS, universal arm64+x86_64)
+        if: runner.os == 'macOS'
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUNIVERSAL_BINARY=ON \
+            -DWAREHOUSE_INSTALL_AFTER_BUILD=OFF
+
+      # No -G here: let cmake pick its own default Visual Studio generator for
+      # whatever VS version windows-latest currently ships, rather than
+      # hardcoding a generator name that breaks the next time that image
+      # rolls to a new Visual Studio release.
+      - name: Configure (Windows, x64)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -A x64 -DWAREHOUSE_INSTALL_AFTER_BUILD=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      # WarehouseTests/WarehouseProcessorTests print "ALL SUITES PASSED - 0
+      # failures" and return 0 on success, or print "SUITE FAILURES" and
+      # return 1 on any failure (tests/EngineTestMain.cpp,
+      # tests/ProcessorTestMain.cpp -- both mains sum every suite's failure
+      # count and `return total == 0 ? 0 : 1`). That non-zero exit is what
+      # these steps rely on to fail the job.
+
+      - name: Run WarehouseTests (macOS)
+        if: runner.os == 'macOS'
+        run: ./build/WarehouseTests_artefacts/Release/WarehouseTests
+
+      - name: Run WarehouseProcessorTests (macOS)
+        if: runner.os == 'macOS'
+        run: ./build/WarehouseProcessorTests_artefacts/Release/WarehouseProcessorTests
+
+      # pwsh does not turn a non-zero exit code from a native .exe into a
+      # failed step on its own -- only $LASTEXITCODE reflects it, so each
+      # Windows test step has to check it and exit explicitly.
+      - name: Run WarehouseTests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & ".\build\WarehouseTests_artefacts\Release\WarehouseTests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run WarehouseProcessorTests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & ".\build\WarehouseProcessorTests_artefacts\Release\WarehouseProcessorTests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # WarehouseVst3Check hosts the shipped .vst3 bundle through JUCE's own
+      # VST3 hosting layer -- no window server, no plugin registrar, so it
+      # runs fine headless. The default bundle path it falls back to
+      # (~/Library/Audio/Plug-Ins/VST3/Reverb.vst3) does not exist on a CI
+      # runner, so the path to the just-built bundle is passed explicitly.
+      #
+      # Not run on Windows: this tool has never been exercised on that
+      # platform, and this workflow is not the place to find out for the
+      # first time whether JUCE's VST3 host layer behaves identically there.
+      # It likely would work (the tool only scans/hosts a bundle in-process,
+      # no OS-level plugin registration), but "likely" is not "confident".
+      - name: Run WarehouseVst3Check (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          ./build/WarehouseVst3Check_artefacts/Release/WarehouseVst3Check \
+            "$(pwd)/build/Warehouse_artefacts/Release/VST3/Warehouse.vst3"
+
+      # Windows too, despite the tool never having been exercised there. The
+      # alternative is that the Windows VST3's ONLY validation before it reaches
+      # a stranger is "it compiled" -- nothing ever loads it or passes audio
+      # through it. This tool hosts a bundle in-process via JUCE's own VST3
+      # host layer; it registers nothing with the OS and needs no window server,
+      # so there is no platform-specific reason for it to fail.
+      #
+      # If it turns out to fail for an environmental reason rather than a real
+      # defect, that shows up on the first run and is cheap to relax. Shipping
+      # an unloaded binary is not cheap to relax.
+      - name: Run WarehouseVst3Check (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & ".\build\WarehouseVst3Check_artefacts\Release\WarehouseVst3Check.exe" `
+            "$PWD\build\Warehouse_artefacts\Release\VST3\Warehouse.vst3"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # auval is deliberately not run here: it needs the AU bundle installed
+      # into ~/Library/Audio/Plug-Ins/Components and a working
+      # AudioComponentRegistrar, which this job does not set up. It may work
+      # on a macos-14 runner if that install step is added later, but that is
+      # separate work -- this job should not silently depend on it.

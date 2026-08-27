@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+Distribution template consumed by productbuild's "distribution" mode.
+build-pkg.sh substitutes @VERSION@ before use; everything else is static.
+customize="allow" is what makes the AU and VST3 choices individually
+deselectable in the installer UI while still installing both by default
+(start_selected="true" on each).
+-->
+<installer-gui-script minSpecVersion="1">
+    <title>Warehouse @VERSION@</title>
+    <organization>com.emirsezer</organization>
+    <domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false"/>
+    <options customize="allow" require-scripts="false"/>
+
+    <welcome file="welcome.txt" mime-type="text/plain"/>
+    <license file="LICENSE.txt" mime-type="text/plain"/>
+    <readme file="readme.txt" mime-type="text/plain"/>
+
+    <pkg-ref id="com.emirsezer.warehouse.au"/>
+    <pkg-ref id="com.emirsezer.warehouse.vst3"/>
+
+    <choices-outline>
+        <line choice="choice.au"/>
+        <line choice="choice.vst3"/>
+    </choices-outline>
+
+    <choice id="choice.au"
+            title="Audio Unit (AU)"
+            description="Installs Warehouse.component into /Library/Audio/Plug-Ins/Components, for hosts such as Logic Pro and GarageBand."
+            start_selected="true">
+        <pkg-ref id="com.emirsezer.warehouse.au"/>
+    </choice>
+
+    <choice id="choice.vst3"
+            title="VST3"
+            description="Installs Warehouse.vst3 into /Library/Audio/Plug-Ins/VST3, for hosts such as Ableton Live, Bitwig, Cubase and Reaper."
+            start_selected="true">
+        <pkg-ref id="com.emirsezer.warehouse.vst3"/>
+    </choice>
+
+    <pkg-ref id="com.emirsezer.warehouse.au" version="@VERSION@" onConclusion="none">au.pkg</pkg-ref>
+    <pkg-ref id="com.emirsezer.warehouse.vst3" version="@VERSION@" onConclusion="none">vst3.pkg</pkg-ref>
+</installer-gui-script>

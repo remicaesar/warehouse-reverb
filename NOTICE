@@ -1,0 +1,61 @@
+Warehouse — a house-focused algorithmic reverb
+Copyright (C) 2026 Emir Sezer
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. See LICENSE for the full text.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+================================================================================
+Third-party components
+================================================================================
+
+JUCE
+  Copyright (c) Raw Material Software Limited.
+  https://juce.com
+  The JUCE framework modules are dual-licensed under the AGPLv3 and a commercial
+  JUCE licence. Warehouse uses them under the AGPLv3, which is why Warehouse
+  itself is AGPLv3. See libs/JUCE/LICENSE.md in a checkout with the submodule
+  initialised.
+
+  JUCE is NOT redistributed in this repository. It is referenced as a git
+  submodule pinned to commit 7aae7d8e8deb8413bb01633d2795ef9974a181c5. That
+  commit is one commit past the 9.0.1 tag on JUCE's master branch and its own
+  CMakeLists.txt declares project(JUCE VERSION 9.0.1); it is named precisely
+  here rather than as a version string so that the exact JUCE source used in
+  any binary release can be recovered.
+
+  Binary releases of Warehouse contain compiled JUCE code and are therefore
+  distributed under the AGPLv3. The corresponding complete source, including
+  the pinned JUCE revision, is at:
+
+    https://github.com/remicaesar/warehouse-reverb
+
+VST3 SDK
+  Copyright (c) 2025 Steinberg Media Technologies GmbH.
+  Licensed under the MIT License; see
+  libs/JUCE/modules/juce_audio_processors_headless/format_types/VST3_SDK/LICENSE.txt
+  VST is a trademark of Steinberg Media Technologies GmbH, registered in Europe
+  and other countries.
+
+Audio Units
+  Audio Units, Logic Pro and macOS are trademarks of Apple Inc.
+
+Other names
+  Ableton and Ableton Live are trademarks of Ableton AG. FL Studio is a
+  trademark of Image-Line NV. These names appear here only to describe
+  compatibility; no affiliation or endorsement is implied.
+
+================================================================================
+What is NOT in here
+================================================================================
+
+No third-party reverb source code was copied into this project. The DSP was
+implemented from published technique (feedback delay networks, Schroeder
+allpass diffusion, Jot's attenuation-filter decay law) rather than adapted from
+existing implementations. In particular no code was taken from CloudSeed,
+CloudReverb, Dragonfly Reverb or MVerb, all of which are GPL-3 licensed.

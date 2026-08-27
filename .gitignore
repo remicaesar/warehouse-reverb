@@ -1,0 +1,29 @@
+# Build trees. Covers build/, build-v03/, build-warehouse/ and every parallel
+# tree. A bare `build/` line left the parallel trees unignored.
+build*/
+
+# Rendered audio demos. renders-v03/ alone is ~71 MB; these must never enter
+# git history, where they cannot be removed without a rewrite.
+renders/
+renders-*/
+
+# Working notes: plans, state files, agent scratch. Not part of the released work.
+.claude/
+
+# Generated GUI snapshots are checked in deliberately (docs/), but the tool's
+# scratch output is not.
+*.tmp
+
+# macOS / IDE noise
+.DS_Store
+*.xcuserdatad
+*.xcodeproj
+.vscode/
+.idea/
+
+# Installer output
+dist/
+
+# MCP / browser-automation scratch (console logs, page dumps). Left on disk on
+# purpose -- it belongs to the tool that wrote it -- but it is not project content.
+.playwright-mcp/
