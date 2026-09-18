@@ -89,6 +89,16 @@ constexpr float divergenceCeilingLinear = 4.0f;
 // lands in [0.25, 0.7448], and a linear interpolation between any two stays there.
 float boundsSampleValue (int i) { return 0.25f + 0.5f * static_cast<float> (i % 97) / 97.0f; }
 
+/** Where DelayLineFrac's write head stands after the priming loop has pushed `lineSize` samples and
+    the sweep loop has pushed `written + 1` more. Kept as its own function because the off-by-one it
+    encodes is exactly what the original fixed probe list got wrong: the interesting delay is a hair
+    above THIS value, not a hair above `written`.
+*/
+int writtenWriteIndex (int written, int lineSize)
+{
+    return (lineSize + written + 1) % lineSize;
+}
+
 void testDelayLineBounds()
 {
     constexpr int lineSize = 6914;   // the size that first tripped this
@@ -108,7 +118,7 @@ void testDelayLineBounds()
         line.push (boundsSampleValue (i));
 
     double worst = 0.0, worstLag = 0.0;
-    int    violations = 0, lagViolations = 0;
+    int    violations = 0, lagViolations = 0, sweepProbes = 0;
 
     for (int written = 0; written < lineSize + 8; ++written)
     {
@@ -119,8 +129,23 @@ void testDelayLineBounds()
         // adds on top of read()'s: its own minimum is 3 rather than 1, and its own maximum is
         // size - 3 rather than size - 2, so read()'s upper bound is now an OVER-long delay that must
         // come back clamped rather than wrapped.
+        // THE FIXED LIST IS NOT ENOUGH ON ITS OWN, and the reason is worth stating because the
+        // list already looked exhaustive. The float wrap fires only when (writeIndex - delay) is a
+        // TINY NEGATIVE that rounds up to exactly size when size is added, i.e. when the delay sits
+        // a hair ABOVE writeIndex. The `written + 0.0001f` entry below was written for that case and
+        // misses it by exactly one: after the priming loop writeIndex is (written + 1), so that
+        // entry probes a hair above written and leaves (writeIndex - delay) at ~0.9999, safely
+        // positive. Measured on this line size: the float-wrap formulation produces the
+        // out-of-bounds index in 98408 places in the (writeIndex, delay) plane, and the fixed list
+        // below reached exactly 0 of them - so reinstating the bug left this check GREEN while it
+        // blew the tank up to 279 dBFS elsewhere.
+        //
+        // So the list keeps the boundaries it was built for, gains the +1.0001f entry that sits in
+        // the failing region, and is followed by a fine sweep around writeIndex that does not depend
+        // on anyone having worked the arithmetic out correctly.
         for (const float delay : { 0.0f, -1.0f, 0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f, 4.5f,
                                    static_cast<float> (written) + 0.0001f,
+                                   static_cast<float> (written) + 1.0001f,
                                    static_cast<float> (lineSize - 5) + 0.5f,
                                    static_cast<float> (lineSize - 4),
                                    static_cast<float> (lineSize - 4) + 0.5f,
@@ -148,13 +173,44 @@ void testDelayLineBounds()
                 worstLag = std::max (worstLag, std::abs (static_cast<double> (lag)));
             }
         }
+
+        // FINE SWEEP THROUGH THE WRAP BOUNDARY, independent of the list above. The float wrap fires
+        // where (writeIndex - delay) is a tiny negative, so walk the delay in steps far finer than
+        // float32's resolution at these magnitudes (~0.0005 near 6914) across the crossing at
+        // delay == writeIndex. A step of 1e-5 over +/-0.002 puts ~400 probes inside the one window
+        // where rounding can reach size, so no future reader has to have derived that arithmetic
+        // correctly for this check to work.
+        const auto sweepCentre = static_cast<float> (writtenWriteIndex (written, lineSize));
+
+        for (int step = -200; step <= 200; ++step)
+        {
+            const float delay = sweepCentre + static_cast<float> (step) * 1.0e-5f;
+            const float value = line.read (delay);
+
+            if (! std::isfinite (value) || value < lowest || value > highest)
+            {
+                ++violations;
+                worst = std::max (worst, std::abs (static_cast<double> (value)));
+            }
+
+            const float lag = line.readLagrange (delay);
+
+            if (! std::isfinite (lag) || lag < lagLowest || lag > lagHighest)
+            {
+                ++lagViolations;
+                worstLag = std::max (worstLag, std::abs (static_cast<double> (lag)));
+            }
+
+            ++sweepProbes;
+        }
     }
 
     check ("0. delay line stays in bounds",
            violations == 0 && lagViolations == 0,
            fmt ("read() outside [0.25,0.75]=%.0f worst=%.4g", static_cast<double> (violations), worst)
            + fmt ("  readLagrange() outside [0.153,0.842]=%.0f worst=%.4g",
-                  static_cast<double> (lagViolations), worstLag));
+                  static_cast<double> (lagViolations), worstLag)
+           + fmt ("  wrap-boundary probes=%.0f", static_cast<double> (sweepProbes)));
 }
 
 //==================================================================================================
@@ -1224,6 +1280,79 @@ void testNonFiniteInput()
 }
 
 //==================================================================================================
+// 8b. The guard-trip counter itself works.
+//
+// WHY THIS EXISTS, because it is not obvious and its absence was invisible. Roughly fifteen
+// assertions in this suite - every stability sweep, every freeze-hold, the decay-EQ sweeps - lean on
+// `h.guardTrips == 0` to distinguish "the tank is stable" from "the tank blew up and the non-finite
+// guard zeroed the evidence before the output". Nothing asserted that the counter can ever be
+// non-zero. Measured: deleting the single line that latches it (`recovered = true` in
+// ReverbEngine::processChunk) left all 102 engine checks GREEN, which means a refactor that broke
+// the latch would silently turn every one of those fifteen assertions vacuous and return the suite
+// to the exact blindness the counter was added to remove.
+//
+// Check 8 above cannot cover this: it feeds non-finite INPUT, which the input sanitiser replaces
+// with 0 before the FDN ever sees it, so the guard correctly never fires there. The poison has to
+// originate INSIDE the feedback loop.
+//
+// How this drives it there without touching production code: a finite but astronomically large
+// input is not sanitised - only non-finite values are - so feeding samples near the top of float's
+// range at the tank's longest decay lets the 16-line sum and the Hadamard mix overflow to infinity
+// within the loop. That is a genuine internal divergence, which is precisely what the guard is for.
+//
+// Two assertions, not one. That the guard FIRES, and that it still CONTAINS - a guard that trips and
+// then leaks a NaN to the host would be worse than no guard at all.
+//==================================================================================================
+void testNonFiniteGuardFires()
+{
+    Harness h (48000.0, 512, 2);
+
+    auto p = measurementParams (30.0f);
+    p.mix  = 100.0f;
+    p.size = 200.0f;
+    h.engine.setParameters (p);
+
+    // Finite, so the input sanitiser passes it through untouched, and large enough that the
+    // feedback sum reaches infinity in a handful of passes.
+    //
+    // ALTERNATING SIGN, NOT A CONSTANT, and the first attempt at this test got it wrong: a constant
+    // +/-1e38 is pure DC, the tank's input DC blocker removes it, and the FDN sees essentially
+    // nothing. The test then reported `guard trips=0` and looked exactly like a working guard that
+    // simply had nothing to catch. Flipping sign every sample puts the whole of that amplitude at
+    // Nyquist, which the DC blocker passes untouched.
+    constexpr float huge = 1.0e38f;
+
+    int escaped = 0;
+
+    for (int b = 0; b < h.blocksFor (2.0); ++b)
+    {
+        for (int n = 0; n < h.blockSize; ++n)
+        {
+            const float s = (n % 2 == 0) ? huge : -huge;
+
+            h.left [static_cast<size_t> (n)] =  s;
+            h.right[static_cast<size_t> (n)] = -s;
+        }
+
+        h.engine.setParameters (p);
+        h.processBlock();
+
+        for (int n = 0; n < h.blockSize; ++n)
+        {
+            const auto sn = static_cast<size_t> (n);
+
+            if (! std::isfinite (h.left[sn]))  ++escaped;
+            if (! std::isfinite (h.right[sn])) ++escaped;
+        }
+    }
+
+    check ("8b. the guard fires and still contains",
+           h.guardTrips > 0 && escaped == 0,
+           fmt ("guard trips=%.0f (want > 0)  non-finite outputs=%.0f (want 0)",
+                static_cast<double> (h.guardTrips), static_cast<double> (escaped)));
+}
+
+//==================================================================================================
 // 9. Blocks larger than the prepared size are chunked correctly.
 //
 // ReverbEngine::process splits a request bigger than the prepared maxBlockSize into chunks of that
@@ -1373,6 +1502,7 @@ int runEngineTests()
     testResetClearsTail();
     testMono();
     testNonFiniteInput();
+    testNonFiniteGuardFires();
     testChunkedProcessing();
     reportCpu();
 

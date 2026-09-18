@@ -67,38 +67,57 @@ public:
         float outputGainDb  = 0.0f;
         bool  freeze        = false;
 
-        // ---- Phase 1, 6 new fields (PLAN-R2 3.2). decayLowMult/decayHighMult: no DSP reads these
-        // yet -- AttenuationFilter isn't wired into FDNTank until 2A. The rest are wired as of 1b
-        // into classes whose process()/processSample() are no-ops, so none of them changes the
-        // sound yet either. ----
-        float decayLowMult   = 1.4f;      // x, 0.1..4.0, low-band decay multiplier (D1)
-        float decayHighMult  = 0.7f;      // x, 0.05..4.0, high-band decay multiplier (D1)
-        float erMix          = 25.0f;     // %, early/late blend (D4); WetChain 1b no-op
-        float erSizePercent  = 100.0f;    // %, 25..200, ER tap-time scale (D4); EarlyReflections 1b no-op
-        float erSpread       = 60.0f;     // %, L/R ER decorrelation (D4); EarlyReflections 1b no-op
-        float density        = 45.0f;     // %, in-line allpass density (D10); no DSP reads this yet
+        // ---- Phase 1, 6 fields (PLAN-R2 3.2). ALL SIX ARE LIVE. ----
+        //
+        // These carried "no DSP reads this yet" / "1b no-op" notes describing the state of the tree
+        // during phase 1b. Every one of them is now wired and measured, and the stale notes were
+        // actively misleading: this struct is the plugin's central contract, so a reader trusting
+        // them would conclude half the feature set was inert and plan against that. Each field below
+        // names the code that consumes it, which is a fact that can be checked rather than a claim
+        // about a development phase that has since moved on.
+        float decayLowMult   = 1.4f;      // x, 0.1..4.0, low-band decay multiplier (D1);
+                                          //   -> FDNTank.cpp bands.lowMult, measured by T1
+        float decayHighMult  = 0.7f;      // x, 0.05..4.0, high-band decay multiplier (D1);
+                                          //   -> FDNTank.cpp bands.highMult, measured by T1
+        float erMix          = 25.0f;     // %, early/late blend (D4);
+                                          //   -> ReverbEngine.cpp erMixSmoothed, measured by E1/E5/E7
+        float erSizePercent  = 100.0f;    // %, 25..200, ER tap-time scale (D4);
+                                          //   -> EarlyReflections erp.sizePercent, measured by E2/E4
+        float erSpread       = 60.0f;     // %, L/R ER decorrelation (D4);
+                                          //   -> EarlyReflections erp.spreadPercent, measured by E3
+        float density        = 45.0f;     // %, in-line allpass density (D10);
+                                          //   -> FDNTank.cpp densityMix/densityGain, measured by D6/D6b
 
-        // ---- Phase 2, 10 new fields. Wired as of 1b into Ducker/WetChain, both no-ops except the
-        // duck-gain multiply (always exactly 1.0f) and M/S width (real, moved from here into
-        // WetChain -- see the class doc comment). preDelaySync/preDelayDivision: no DSP reads these
-        // yet -- TempoSync isn't wired until 5A. ----
-        float duckAmount       = 0.0f;      // %; Ducker 1b no-op
-        float duckThresholdDb  = -24.0f;    // dB; Ducker 1b no-op
-        float duckReleaseMs    = 250.0f;    // ms; Ducker 1b no-op
-        int   duckCharacter    = 0;         // 0 = Gentle, 1 = Pump (D5); Ducker 1b no-op
-        bool  preDelaySync     = false;
+        // ---- Phase 2, 10 fields. ALL LIVE except where noted. ----
+        //
+        // Same correction as above: these described Ducker and WetChain as no-ops and
+        // preDelaySync/preDelayDivision as unread. The ducker is real and measured by the whole H1-H4
+        // family, the wet chain by W1-W7, and tempo sync by H5-H7b.
+        float duckAmount       = 0.0f;      // %; -> Ducker dp.amountPercent, measured by H1/H4
+        float duckThresholdDb  = -24.0f;    // dB; -> Ducker dp.thresholdDb, measured by H1/H2
+        float duckReleaseMs    = 250.0f;    // ms; -> Ducker dp.releaseMs, measured by H3/H3d/H3e
+        int   duckCharacter    = 0;         // 0 = Gentle, 1 = Pump (D5); -> Ducker, measured by H3b
+        bool  preDelaySync     = false;     // -> ReverbEngine.cpp pre-delay crossfade, measured by H5/H6
         int   preDelayDivision = 5;         // index into the 11-entry division list, D6; 1/8 default
-        // MUST match the APVTS default in Parameters.cpp (idBassMono) and the fallback literal in
-        // PluginProcessor::currentParameters. Raised 130 -> 250 Hz on measurement: the side
-        // response is r^2/sqrt(1+r^4), so 130 Hz left 20-100 Hz side energy only -11.1 dB down,
-        // i.e. bass mono did not do the one thing its name promises. 250 Hz measures -21.8 dB.
-        // This struct default is what a bare Params gives, which is what the DSP test target sees
-        // (it cannot reach Parameters.h -- that pulls in juce_audio_processors), so a test asserting
-        // "the shipping default monos the bass" reads THIS value. Keep the three in step.
-        float bassMonoHz       = 250.0f;    // Hz, 0 = off (D11)
-        float wetLowCutHz      = 20.0f;     // Hz; WetChain 1b no-op
-        float wetHighCutHz     = 20000.0f;  // Hz; WetChain 1b no-op
-        float wetTiltDb        = 0.0f;      // dB; WetChain 1b no-op
+                                            //   -> TempoSync, measured by H5b/H7/H7b
+        // Raised 130 -> 250 Hz on measurement: the side response is r^2/sqrt(1+r^4), so 130 Hz left
+        // 20-100 Hz side energy only -11.1 dB down, i.e. bass mono did not do the one thing its name
+        // promises. 250 Hz measures -21.8 dB.
+        //
+        // THE SAME NUMBER LIVES IN THREE PLACES -- here, createParameterLayout()'s idBassMono, and
+        // the fallback literal in PluginProcessor::currentParameters. This used to say "keep the
+        // three in step", which is a request, not a mechanism, and it did not hold: changing only the
+        // APVTS default to 130 left every one of the project's 121 checks green, including the one
+        // named "and it monos it at the shipping default". W2b in WetPathTests.cpp has to read THIS
+        // value, because the DSP test target cannot reach Parameters.h (that pulls in
+        // juce_audio_processors), so the struct default is the only default it can see.
+        //
+        // a2 in ProcessorTests.cpp is the mechanism that replaced the request: it runs in the target
+        // that can see both and fails if this default and the APVTS default ever disagree.
+        float bassMonoHz       = 250.0f;    // Hz, 0 = off (D11); -> WetChain, measured by W2/W2b/W2c
+        float wetLowCutHz      = 20.0f;     // Hz; -> WetChain wcp.wetLowCutHz, measured by W5
+        float wetHighCutHz     = 20000.0f;  // Hz; -> WetChain wcp.wetHighCutHz, measured by W5
+        float wetTiltDb        = 0.0f;      // dB; -> WetChain wcp.tiltDb, measured by W5
 
         // ---- Phase 3, 4 new fields. drive/shimmerMode/shimmerAmount are wired as of 1b into
         // FDNTank's Saturator/PitchShifter, both no-ops (identity / exactly silent). algorithm is

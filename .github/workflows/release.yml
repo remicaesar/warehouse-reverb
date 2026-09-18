@@ -40,6 +40,60 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
+      # The same assertion ci.yml carries, and it matters more here: this is the
+      # job whose output strangers download. See ci.yml's copy for why the
+      # deployment target has to be read out of the Mach-O rather than trusted
+      # from CMakeLists.txt. Universal build, so each bundle prints two `minos`
+      # lines and both must match -- the x86_64 slice exists precisely to serve
+      # older Intel Macs and is worthless if it is stamped with a modern minimum.
+      - name: Assert the macOS deployment target actually applied
+        run: |
+          EXPECTED=11.0
+          fail=0
+
+          for bundle in \
+              build/Warehouse_artefacts/Release/VST3/Warehouse.vst3/Contents/MacOS/Warehouse \
+              build/Warehouse_artefacts/Release/AU/Warehouse.component/Contents/MacOS/Warehouse
+          do
+              if [ ! -f "$bundle" ]; then
+                  echo "::error::$bundle not found"
+                  fail=1
+                  continue
+              fi
+
+              slices="$(otool -l "$bundle" | awk '/minos/ { print $2 }')"
+
+              if [ -z "$slices" ]; then
+                  echo "::error::$bundle declares no LC_BUILD_VERSION minos at all"
+                  fail=1
+                  continue
+              fi
+
+              count=0
+
+              for minos in $slices; do
+                  count=$((count + 1))
+
+                  if [ "$minos" = "$EXPECTED" ]; then
+                      echo "ok   $bundle slice $count minos=$minos"
+                  else
+                      echo "::error::$bundle slice $count has minos=$minos, expected $EXPECTED."
+                      echo "         CMAKE_OSX_DEPLOYMENT_TARGET did not apply -- check that the"
+                      echo "         set() in CMakeLists.txt still carries FORCE."
+                      fail=1
+                  fi
+              done
+
+              # UNIVERSAL_BINARY=ON above, so anything other than two slices means the fat build
+              # silently degraded and the assertion above only covered half of what ships.
+              if [ "$count" -ne 2 ]; then
+                  echo "::error::$bundle has $count architecture slice(s), expected 2 (arm64 + x86_64)"
+                  fail=1
+              fi
+          done
+
+          exit $fail
+
       # Same reasoning as ci.yml's test steps: these binaries return non-zero
       # on any suite failure. A release built on a broken tree is worse than
       # no release, so this fails the tag build rather than ship it.
@@ -97,6 +151,25 @@ jobs:
           }
           check au.pkg   /Library/Audio/Plug-Ins/Components
           check vst3.pkg /Library/Audio/Plug-Ins/VST3
+
+          # relocatable="false", asserted rather than assumed. pkgbuild can mark a
+          # bundle relocatable, and macOS then installs OVER wherever it finds an
+          # existing copy instead of the install-location declared just above. A
+          # user with a stale Warehouse.component in ~/Library would silently get
+          # the update there, defeating the whole point of the /Library install --
+          # and the checks above would still pass, because the declared location
+          # is correct; it is simply not the one used. Currently false, so this
+          # pins the behaviour rather than changing it.
+          for sub in au.pkg vst3.pkg; do
+              actual="$(grep -o 'relocatable="[^"]*"' "$EXP/$sub/PackageInfo" || echo '(absent)')"
+
+              if [ "$actual" = 'relocatable="false"' ]; then
+                  echo "ok   $sub is not relocatable"
+              else
+                  echo "::error::$sub must declare relocatable=\"false\", found: $actual"
+                  fail=1
+              fi
+          done
 
           # Payload roots must be the bundles themselves, not a nested folder --
           # pkgbuild --root semantics make that easy to get wrong by one level,

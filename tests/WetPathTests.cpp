@@ -387,6 +387,19 @@ void testBassMonoMonosTheBass()
     const double highBypass = bandEnergy (bypassSide, settle, window, 500.0, 5000.0, 10.0, testRate);
 
     // The shipping default, not a literal -- see W2b in the block comment.
+    //
+    // THIS READS THE STRUCT DEFAULT, NOT THE APVTS ONE, and that is a real indirection worth being
+    // explicit about. This target links only juce_dsp / juce_audio_basics on purpose, so it cannot
+    // include Parameters.h and cannot see createParameterLayout()'s default at all -- the value the
+    // user actually gets. For a while that made this check's name a promise it could not keep:
+    // changing ONLY the APVTS default from 250 to 130 Hz left this check green while shipping a
+    // corner that measures about -18 dB against the -20 dB bar W2 asserts twenty lines below.
+    //
+    // What closes it is a2 in ProcessorTests.cpp, which runs in the target that CAN see both and
+    // fails if ReverbEngine::Params' default and the APVTS default ever disagree. So this line is a
+    // legitimate proxy for the shipping default because a2 holds them equal -- not because the two
+    // happen to agree today. If a2 is ever deleted, this check silently goes back to measuring the
+    // wrong constant.
     const float defaultHz = ReverbEngine::Params {}.bassMonoHz;
 
     std::vector<float> corners { 130.0f, 200.0f, 250.0f, 300.0f, 400.0f };
