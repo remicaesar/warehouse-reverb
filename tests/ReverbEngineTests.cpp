@@ -1260,20 +1260,30 @@ void testNonFiniteInput()
 // range at the tank's longest decay lets the 16-line sum and the Hadamard mix overflow to infinity
 // within the loop. That is a genuine internal divergence, which is precisely what the guard is for.
 //
-// Two assertions, not one. That the guard FIRES, and that it still CONTAINS - a guard that trips and
-// then leaks a NaN to the host would be worse than no guard at all.
+// THREE LEGS, AND THEY ARE NOT EQUALLY STRONG. Which one can actually catch what is worth stating
+// plainly, because two assertions on this branch already turned out to prove nothing.
 //
-// CONTAINMENT IS CHECKED ONLY IN THE BLOCKS WHERE THE GUARD FIRED, and the restriction is the
-// assertion being honest rather than a weakening of it. The guard inspects the TANK output
-// (wetL/wetR/erL/erR/duckGain); when it trips it zeroes the whole output block and returns, so
-// those blocks are where it promises anything. In a block where it does NOT trip, the tank output
-// is finite by definition but may still be astronomically large, and WetChain's M/S stage computes
-// (l - r) * 0.5f on it - which overflows to infinity for l and r near opposite ends of float's
-// range, as this test's anti-phase drive produces. Whether any block lands in that narrow band
-// depends on how abruptly the FDN sum saturates, i.e. on FMA contraction and vectorisation, so an
-// unconditional check here would be green under clang and could be red under MSVC. `recovered` is
-// cleared at the top of every ReverbEngine::process call, so Harness::guardTrips advancing across a
-// block is exactly "the guard fired in THIS block".
+//   1. THE GUARD FIRES (h.guardTrips > 0). What intent item 6 asks for, and sound: deleting the
+//      `recovered = true` latch in ReverbEngine::processChunk turns it red.
+//
+//   2. THE SCOPED FINITENESS SCAN (escaped == 0) CANNOT FAIL. It is kept for its scope, not for
+//      its strength, and it is not evidence that the guard contains anything. The branch that
+//      latches the counter also zeroes the whole output block and returns, and one Harness block
+//      is exactly one processChunk here (prepare() sets capacity to max(maxBlockSize, 32) = 512),
+//      so "the guard fired in this block" already implies "this block is all zeros". The scoping
+//      is still right: in a block where the guard does NOT fire the tank output is finite by
+//      definition but may be astronomically large, and WetChain's (l - r) * 0.5f can overflow on
+//      it, so an unconditional scan would depend on FMA contraction and vectorisation -- green
+//      under clang, possibly red under MSVC.
+//
+//   3. THE RECOVERY LEG is the falsifiable one, and it is what actually tests containment. The
+//      guard's documented promise is to "trade one silent block for a full state clear", so once
+//      the drive stops the tank must be clean: silence in, finite out, and no further trips.
+//      DELETING THE reset() CALL FROM THE GUARD BRANCH KILLS THIS LEG -- the tank stays poisoned
+//      and trips on every subsequent silent block.
+//
+// `recovered` is cleared at the top of every ReverbEngine::process call, so Harness::guardTrips
+// advancing across a block is exactly "the guard fired in THIS block".
 //==================================================================================================
 void testNonFiniteGuardFires()
 {
@@ -1293,6 +1303,8 @@ void testNonFiniteGuardFires()
     // simply had nothing to catch. Flipping sign every sample puts the whole of that amplitude at
     // Nyquist, which the DC blocker passes untouched.
     constexpr float huge = 1.0e38f;
+
+    constexpr int recoveryBlocks = 8;
 
     int escaped = 0, guardedBlocks = 0;
 
@@ -1325,11 +1337,39 @@ void testNonFiniteGuardFires()
         }
     }
 
-    check ("8b. the guard fires and still contains",
-           h.guardTrips > 0 && escaped == 0,
-           fmt ("guard trips=%.0f (want > 0)", static_cast<double> (h.guardTrips))
+    const int drivenTrips = h.guardTrips;
+
+    int recoveryTrips = 0, recoveryEscaped = 0;
+
+    for (int b = 0; b < recoveryBlocks; ++b)
+    {
+        h.fillSilence();
+        h.engine.setParameters (p);
+
+        const int tripsBefore = h.guardTrips;
+        h.processBlock();
+
+        if (h.guardTrips != tripsBefore)
+            ++recoveryTrips;
+
+        for (int n = 0; n < h.blockSize; ++n)
+        {
+            const auto sn = static_cast<size_t> (n);
+
+            if (! std::isfinite (h.left[sn]))  ++recoveryEscaped;
+            if (! std::isfinite (h.right[sn])) ++recoveryEscaped;
+        }
+    }
+
+    check ("8b. the guard fires, and the state clear it promises really recovers the tank",
+           drivenTrips > 0 && escaped == 0 && recoveryTrips == 0 && recoveryEscaped == 0,
+           fmt ("guard trips=%.0f (want > 0)", static_cast<double> (drivenTrips))
            + fmt ("  non-finite outputs in those %.0f blocks=%.0f (want 0)",
-                  static_cast<double> (guardedBlocks), static_cast<double> (escaped)));
+                  static_cast<double> (guardedBlocks), static_cast<double> (escaped))
+           + fmt ("  trips over %.0f silent blocks after the drive=%.0f (want 0)",
+                  static_cast<double> (recoveryBlocks), static_cast<double> (recoveryTrips))
+           + fmt ("  non-finite outputs there=%.0f (want 0)",
+                  static_cast<double> (recoveryEscaped)));
 }
 
 //==================================================================================================
