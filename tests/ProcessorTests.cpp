@@ -607,7 +607,10 @@ void testEngineDefaultsMatchApvts()
     const reverb::ReverbEngine::Params engineDefaults {};
 
     // Every ReverbEngine::Params field that a host parameter feeds, paired with that parameter.
-    // Fields with no parameter behind them are deliberately absent.
+    // Fields with no parameter behind them are deliberately absent. The two bool fields sit in
+    // this table like everything else: a BoolParam's default converts to exactly 0 or 1, which the
+    // tolerance below separates cleanly, so they need no second comparison path -- and when they
+    // had one it compared the struct against itself and never read the layout at all.
     const std::pair<const char*, float> pairs[]
     {
         { reverb::param::idMix,          engineDefaults.mix },
@@ -644,6 +647,8 @@ void testEngineDefaultsMatchApvts()
         { reverb::param::idWetLowCut,    engineDefaults.wetLowCutHz },
         { reverb::param::idWetHighCut,   engineDefaults.wetHighCutHz },
         { reverb::param::idWetTilt,      engineDefaults.wetTiltDb },
+        { reverb::param::idFreeze,       static_cast<float> (engineDefaults.freeze) },
+        { reverb::param::idPreDelaySync, static_cast<float> (engineDefaults.preDelaySync) },
     };
 
     std::string drifted;
@@ -676,13 +681,9 @@ void testEngineDefaultsMatchApvts()
         }
     }
 
-    // freeze and predelaysync are bools on both sides; compared separately so the table above can
-    // stay float-typed.
-    const bool boolsAgree = ! engineDefaults.freeze && ! engineDefaults.preDelaySync;
-
     check ("a2. ReverbEngine::Params defaults match the shipping layout",
-           mismatches == 0 && boolsAgree,
-           mismatches == 0 && boolsAgree
+           mismatches == 0,
+           mismatches == 0
                ? fmt ("fields compared=%.0f all in step with the APVTS default",
                       static_cast<double> (std::size (pairs)))
                : std::string ("drifted: ") + drifted);

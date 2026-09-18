@@ -26,10 +26,11 @@ namespace reverb
                                                                                      v
         in ------------------------------------------------------------------- dry/wet mix -> trim
 
-    WetChain is "everything after the tank, before the dry/wet mix": ER blend, wet EQ, M/S width,
-    D11 bass mono, then duck gain, in that order. As of step 1b only width and the duck multiply
-    are real (both bit-identical to what used to live inline here); the rest are no-ops until 2B/
-    5A/5B (PLAN-R2 step 6).
+    WetChain is "everything after the tank, before the dry/wet mix": wet EQ (low cut, high cut,
+    tilt shelf), M/S width, D11 bass mono, then duck gain, in that order. All of it is live and
+    measured -- W2/W2b/W2c cover the EQ and the bass mono, W5 the width and the duck multiply.
+    The early/late blend is NOT part of WetChain: it happens once in processChunk(), ahead of
+    everything WetChain does, which is why WetChain has no erMix of its own.
 
     prepare() is the only function that allocates. process() takes no locks and does no I/O.
 */

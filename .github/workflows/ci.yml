@@ -85,59 +85,15 @@ jobs:
       # count and `return total == 0 ? 0 : 1`). That non-zero exit is what
       # these steps rely on to fail the job.
 
-      # THE DEPLOYMENT TARGET HAS TO BE ASSERTED, NOT TRUSTED.
-      #
-      # CMakeLists.txt sets CMAKE_OSX_DEPLOYMENT_TARGET to 11.0, and for the whole of v1.0.0 that
-      # line did nothing: project() has already created the cache entry, so a set(... CACHE ...)
-      # without FORCE is a silent no-op. Every bundle was stamped with the BUILD MACHINE'S SDK
-      # version instead -- measured at `minos 26.0` on a macOS 26.5 SDK, i.e. a plugin that refuses
-      # to load on every macOS version the README claims to support, including both slices of the
-      # universal build whose entire purpose is older Intel Macs.
-      #
-      # Nothing in the source, the build log, the test suite or the packaging step could see it. The
-      # only place the real value appears is the Mach-O load command, so that is what this reads.
-      # The fix and this assertion are one change: without the assertion the same defect returns the
-      # next time someone touches this block, and it returns invisibly.
+      # Why this is asserted rather than trusted, and why it reads the Mach-O rather than the
+      # source, is recorded in the script -- which release.yml runs too, so the check cannot drift
+      # between the two workflows.
       - name: Assert the macOS deployment target actually applied
         if: runner.os == 'macOS'
         run: |
-          EXPECTED=11.0
-          fail=0
-
-          for bundle in \
+          scripts/assert-min-macos.sh 11.0 \
               build/Warehouse_artefacts/Release/VST3/Warehouse.vst3/Contents/MacOS/Warehouse \
               build/Warehouse_artefacts/Release/AU/Warehouse.component/Contents/MacOS/Warehouse
-          do
-              if [ ! -f "$bundle" ]; then
-                  echo "::error::$bundle not found"
-                  fail=1
-                  continue
-              fi
-
-              # One `minos` line per architecture slice, so a universal binary prints two and BOTH
-              # must match -- an x86_64 slice stamped with a modern minos is exactly as unloadable
-              # as an arm64 one, and is the slice most likely to be running an older macOS.
-              slices="$(otool -l "$bundle" | awk '/minos/ { print $2 }')"
-
-              if [ -z "$slices" ]; then
-                  echo "::error::$bundle declares no LC_BUILD_VERSION minos at all"
-                  fail=1
-                  continue
-              fi
-
-              for minos in $slices; do
-                  if [ "$minos" = "$EXPECTED" ]; then
-                      echo "ok   $(basename "$(dirname "$(dirname "$bundle")")") slice minos=$minos"
-                  else
-                      echo "::error::$bundle has minos=$minos, expected $EXPECTED."
-                      echo "         CMAKE_OSX_DEPLOYMENT_TARGET did not apply -- check that the"
-                      echo "         set() in CMakeLists.txt still carries FORCE."
-                      fail=1
-                  fi
-              done
-          done
-
-          exit $fail
 
       - name: Run WarehouseTests (macOS)
         if: runner.os == 'macOS'

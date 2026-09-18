@@ -40,59 +40,14 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      # The same assertion ci.yml carries, and it matters more here: this is the
-      # job whose output strangers download. See ci.yml's copy for why the
-      # deployment target has to be read out of the Mach-O rather than trusted
-      # from CMakeLists.txt. Universal build, so each bundle prints two `minos`
-      # lines and both must match -- the x86_64 slice exists precisely to serve
-      # older Intel Macs and is worthless if it is stamped with a modern minimum.
+      # The same assertion ci.yml carries, run from the same script, and it matters more here:
+      # this is the job whose output strangers download. The x86_64 slice exists precisely to
+      # serve older Intel Macs and is worthless if it is stamped with a modern minimum.
       - name: Assert the macOS deployment target actually applied
         run: |
-          EXPECTED=11.0
-          fail=0
-
-          for bundle in \
+          scripts/assert-min-macos.sh 11.0 \
               build/Warehouse_artefacts/Release/VST3/Warehouse.vst3/Contents/MacOS/Warehouse \
               build/Warehouse_artefacts/Release/AU/Warehouse.component/Contents/MacOS/Warehouse
-          do
-              if [ ! -f "$bundle" ]; then
-                  echo "::error::$bundle not found"
-                  fail=1
-                  continue
-              fi
-
-              slices="$(otool -l "$bundle" | awk '/minos/ { print $2 }')"
-
-              if [ -z "$slices" ]; then
-                  echo "::error::$bundle declares no LC_BUILD_VERSION minos at all"
-                  fail=1
-                  continue
-              fi
-
-              count=0
-
-              for minos in $slices; do
-                  count=$((count + 1))
-
-                  if [ "$minos" = "$EXPECTED" ]; then
-                      echo "ok   $bundle slice $count minos=$minos"
-                  else
-                      echo "::error::$bundle slice $count has minos=$minos, expected $EXPECTED."
-                      echo "         CMAKE_OSX_DEPLOYMENT_TARGET did not apply -- check that the"
-                      echo "         set() in CMakeLists.txt still carries FORCE."
-                      fail=1
-                  fi
-              done
-
-              # UNIVERSAL_BINARY=ON above, so anything other than two slices means the fat build
-              # silently degraded and the assertion above only covered half of what ships.
-              if [ "$count" -ne 2 ]; then
-                  echo "::error::$bundle has $count architecture slice(s), expected 2 (arm64 + x86_64)"
-                  fail=1
-              fi
-          done
-
-          exit $fail
 
       # Same reasoning as ci.yml's test steps: these binaries return non-zero
       # on any suite failure. A release built on a broken tree is worse than
@@ -152,21 +107,35 @@ jobs:
           check au.pkg   /Library/Audio/Plug-Ins/Components
           check vst3.pkg /Library/Audio/Plug-Ins/VST3
 
-          # relocatable="false", asserted rather than assumed. pkgbuild can mark a
+          # Not relocatable, asserted rather than assumed. pkgbuild can mark a
           # bundle relocatable, and macOS then installs OVER wherever it finds an
           # existing copy instead of the install-location declared just above. A
           # user with a stale Warehouse.component in ~/Library would silently get
           # the update there, defeating the whole point of the /Library install --
           # and the checks above would still pass, because the declared location
-          # is correct; it is simply not the one used. Currently false, so this
-          # pins the behaviour rather than changing it.
+          # is correct; it is simply not the one used.
+          #
+          # READ THE <relocate> ELEMENT, NOT THE relocatable ATTRIBUTE. pkg-info's
+          # relocatable="false" is emitted unconditionally and is NOT the field
+          # that records this: building the same component package twice, once
+          # with a component plist setting BundleIsRelocatable true, leaves that
+          # attribute byte-identical and changes only <relocate/> into
+          # <relocate><bundle id="..."/></relocate>. An assertion on the
+          # attribute therefore can never fail. Do not simplify this back.
           for sub in au.pkg vst3.pkg; do
-              actual="$(grep -o 'relocatable="[^"]*"' "$EXP/$sub/PackageInfo" || echo '(absent)')"
+              relocated="$(xmllint --xpath 'count(/pkg-info/relocate/bundle)' \
+                           "$EXP/$sub/PackageInfo" 2>/dev/null)" || relocated=""
 
-              if [ "$actual" = 'relocatable="false"' ]; then
+              if [ -z "$relocated" ]; then
+                  echo "::error::$sub PackageInfo could not be parsed for a <relocate> element"
+                  fail=1
+              elif [ "$relocated" = "0" ]; then
                   echo "ok   $sub is not relocatable"
               else
-                  echo "::error::$sub must declare relocatable=\"false\", found: $actual"
+                  echo "::error::$sub is relocatable: <relocate> names $relocated bundle(s)."
+                  echo "         macOS would install over an existing copy instead of the"
+                  echo "         declared install-location. Check packaging/build-pkg.sh for a"
+                  echo "         --component-plist setting BundleIsRelocatable."
                   fail=1
               fi
           done
