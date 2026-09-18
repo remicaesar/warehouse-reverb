@@ -651,6 +651,14 @@ void testEngineDefaultsMatchApvts()
         { reverb::param::idPreDelaySync, static_cast<float> (engineDefaults.preDelaySync) },
     };
 
+    static_assert (std::size (pairs) == static_cast<size_t> (reverb::param::numParameters) - 2,
+                   "every parameter must be compared against its ReverbEngine::Params field here -- "
+                   "a1 pins the layout value, and without this a new parameter is pinned there "
+                   "while its Params default drifts away unseen. The subtracted 2 is idDamping and "
+                   "idLowCut, the one documented exemption: Params deliberately keeps 6000/120 "
+                   "against the layout's 3500/250 because the frozen stability-sweep numbers snap "
+                   "from a default-constructed Params");
+
     std::string drifted;
     int         mismatches = 0;
 

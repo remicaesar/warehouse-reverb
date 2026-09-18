@@ -1282,6 +1282,17 @@ void testNonFiniteInput()
 //      DELETING THE reset() CALL FROM THE GUARD BRANCH KILLS THIS LEG -- the tank stays poisoned
 //      and trips on every subsequent silent block.
 //
+//      THE DRIVE STOPS ON AN OBSERVED TRIP, NOT AFTER A FIXED BLOCK COUNT, and that is what makes
+//      this leg's precondition something the test controls. reset() clears every FDN line, and at
+//      Size 200% the shortest line is longer than three blocks, so the tank cannot re-trip on the
+//      very next block: trips come roughly every fourth block, and a fixed-length drive would end
+//      on a trip block only by luck. End it anywhere else and the lines still hold 1e38 content
+//      that the first silent blocks read back, which trips the guard again and reddens this leg
+//      with the engine behaving exactly as designed -- a coin toss that FMA contraction and
+//      vectorisation could flip on the MSVC job. Breaking on the first trip means the silent
+//      phase always starts from a freshly reset tank. Never observing a trip is not a silent
+//      skip: drivenTrips stays 0 and leg 1 fails.
+//
 // `recovered` is cleared at the top of every ReverbEngine::process call, so Harness::guardTrips
 // advancing across a block is exactly "the guard fired in THIS block".
 //==================================================================================================
@@ -1335,6 +1346,8 @@ void testNonFiniteGuardFires()
             if (! std::isfinite (h.left[sn]))  ++escaped;
             if (! std::isfinite (h.right[sn])) ++escaped;
         }
+
+        break;
     }
 
     const int drivenTrips = h.guardTrips;
