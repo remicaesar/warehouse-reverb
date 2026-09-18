@@ -215,11 +215,12 @@ private:
 /** D1a: clamps the two D1a-repurposed crossover fields (Params::dampingHz -> 1000..12000 Hz,
     Params::lowCutHz -> 60..800 Hz) to their new range, PLAN-R2 3.1.
 
-    Per the plan this belongs inside ReverbEngine::setParameters() (ReverbEngine.cpp), which
-    currently passes both through unclamped -- but that file is step 2A's, not step 1a's, so it is
-    a header-visible free function a caller can apply first. PluginProcessor::currentParameters()
-    is that caller today; 2A's fold should fold this clamp into setParameters() directly and this
-    function can then be retired.
+    Per the plan this belongs inside ReverbEngine::setParameters() (ReverbEngine.cpp). THE FOLD HAS
+    LANDED AND DID NOT MOVE IT: setParameters() still assigns dampingHz/lowCutHz straight through
+    unclamped, so this header-visible free function remains the only thing holding them in range and
+    is not retired. PluginProcessor::engineParameters() is the one caller that applies it, on every
+    parameter update. Anything else that builds a Params by hand -- a test, a future caller -- is
+    unclamped unless it applies this itself.
 */
 inline ReverbEngine::Params sanitiseCrossovers (ReverbEngine::Params p) noexcept
 {

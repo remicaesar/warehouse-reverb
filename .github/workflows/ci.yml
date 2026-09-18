@@ -78,13 +78,6 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      # WarehouseTests/WarehouseProcessorTests print "ALL SUITES PASSED - 0
-      # failures" and return 0 on success, or print "SUITE FAILURES" and
-      # return 1 on any failure (tests/EngineTestMain.cpp,
-      # tests/ProcessorTestMain.cpp -- both mains sum every suite's failure
-      # count and `return total == 0 ? 0 : 1`). That non-zero exit is what
-      # these steps rely on to fail the job.
-
       # Why this is asserted rather than trusted, and why it reads the Mach-O rather than the
       # source, is recorded in the script -- which release.yml runs too, so the check cannot drift
       # between the two workflows.
@@ -94,6 +87,13 @@ jobs:
           scripts/assert-min-macos.sh 11.0 \
               build/Warehouse_artefacts/Release/VST3/Warehouse.vst3/Contents/MacOS/Warehouse \
               build/Warehouse_artefacts/Release/AU/Warehouse.component/Contents/MacOS/Warehouse
+
+      # WarehouseTests/WarehouseProcessorTests print "ALL SUITES PASSED - 0
+      # failures" and return 0 on success, or print "SUITE FAILURES" and
+      # return 1 on any failure (tests/EngineTestMain.cpp,
+      # tests/ProcessorTestMain.cpp -- both mains sum every suite's failure
+      # count and `return total == 0 ? 0 : 1`). That non-zero exit is what
+      # these steps rely on to fail the job.
 
       - name: Run WarehouseTests (macOS)
         if: runner.os == 'macOS'
