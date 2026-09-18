@@ -45,18 +45,22 @@ public:
         float size          = 100.0f;     // %
         float decaySeconds  = 2.5f;
 
-        // D1a "documented wart" (PLAN-R2 D1a, THE FOLD): these two fields are being repurposed as
-        // the Decay EQ's two crossover frequencies -- dampingHz -> HIGH crossover (1000..12000 Hz),
-        // lowCutHz -> LOW crossover (60..800 Hz). Field names stay as they are today because the
-        // fold itself (deleting the per-line damping/low-cut filters in favour of an
-        // AttenuationFilter) happens in ReverbEngine.cpp/FDNTank.cpp, which step 2A owns and this
-        // step does not touch. Default member initialisers below are deliberately left at their
-        // OLD values (6000/120): they only matter as a bare-Params fallback inside this header's
-        // own tests, and changing them risks perturbing the frozen stability-sweep numbers that
-        // snap from a default-constructed Params on the very first setParameters() call. The real,
-        // product-facing default (3500/250) lives in src/Parameters.cpp's createParameterLayout().
-        // sanitiseCrossovers() below clamps both to their new range until 2A's setParameters() does
-        // it directly (PLAN-R2 step 6, "ReverbEngine::setParameters must also clamp...").
+        // D1a "documented wart" (PLAN-R2 D1a, THE FOLD): these two fields ARE the Decay EQ's two
+        // crossover frequencies -- dampingHz -> HIGH crossover (1000..12000 Hz), lowCutHz -> LOW
+        // crossover (60..800 Hz). The fold has landed: the per-line damping and low-cut filters
+        // are gone, replaced by one AttenuationFilter per line (FDNTank.h). Only the field names
+        // were kept, which is the whole of the wart.
+        //
+        // Default member initialisers below are deliberately left at their OLD values (6000/120):
+        // they only matter as a bare-Params fallback inside this header's own tests, and changing
+        // them risks perturbing the frozen stability-sweep numbers that snap from a
+        // default-constructed Params on the very first setParameters() call. The real,
+        // product-facing default (3500/250) lives in src/Parameters.cpp's createParameterLayout(),
+        // and test a2 names exactly these two fields as its one exemption when it holds Params
+        // defaults equal to the shipping layout.
+        //
+        // setParameters() passes both through unclamped, so sanitiseCrossovers() below is what
+        // holds them in range; PluginProcessor.cpp applies it on the way in.
         float dampingHz     = 6000.0f;
         float lowCutHz      = 120.0f;
 

@@ -46,7 +46,13 @@ for bundle in "$@"; do
     # One `minos` line per architecture slice, so a universal binary prints two and BOTH must
     # match -- an x86_64 slice stamped with a modern minos is exactly as unloadable as an arm64
     # one, and is the slice most likely to be running an older macOS.
-    slices="$(otool -l "$bundle" | awk '/minos/ { print $2 }')"
+    #
+    # -arch all IS REQUIRED. Plain `otool -l` resolves a fat file to the host slice for some
+    # architecture combinations -- measured: on an x86_64+arm64e binary it prints one minos, while
+    # -arch all prints both -- so it cannot be trusted to have looked at the x86_64 slice, which is
+    # the one this assertion most needs to see. -arch all enumerates every slice unconditionally
+    # and works on a thin binary too, so no caller needs a special case.
+    slices="$(otool -arch all -l "$bundle" | awk '/minos/ { print $2 }')"
 
     if [ -z "$slices" ]; then
         echo "::error::$bundle declares no LC_BUILD_VERSION minos at all"
