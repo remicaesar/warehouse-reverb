@@ -1265,7 +1265,14 @@ void testPerLineUniformity()
 //==================================================================================================
 void testDcBlocker()
 {
-    constexpr double fs = 48000.0;
+    // `static` is what lets the lambdas below use this without capturing it. MSVC rejects an
+    // implicit read of a non-static constexpr local inside a lambda (C3493); clang and GCC
+    // accept it, and reject the obvious fixes in turn -- an explicit capture draws
+    // -Wunused-lambda-capture and an init-capture draws -Wshadow-uncaptured-local. Static
+    // storage duration sidesteps all three: nothing is captured on any compiler. This file
+    // had never been compiled by MSVC, because the Windows build died at CMake configure
+    // long before reaching a compiler.
+    static constexpr double fs = 48000.0;
 
     auto dcMean = [] (float lowMult, float lowCutHz)
     {

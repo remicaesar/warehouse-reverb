@@ -225,8 +225,15 @@ void testDelayLineLagrangeReference()
         return static_cast<double> (history[history.size() - static_cast<size_t> (j)]);
     };
 
-    constexpr int width = reverb::DelayLineFrac::kernelWidth;
-    constexpr int first = -reverb::DelayLineFrac::lagrangeAhead;
+    // `static` is what lets the lambdas below use this without capturing it. MSVC rejects an
+    // implicit read of a non-static constexpr local inside a lambda (C3493); clang and GCC
+    // accept it, and reject the obvious fixes in turn -- an explicit capture draws
+    // -Wunused-lambda-capture and an init-capture draws -Wshadow-uncaptured-local. Static
+    // storage duration sidesteps all three: nothing is captured on any compiler. This file
+    // had never been compiled by MSVC, because the Windows build died at CMake configure
+    // long before reaching a compiler.
+    static constexpr int width = reverb::DelayLineFrac::kernelWidth;
+    static constexpr int first = -reverb::DelayLineFrac::lagrangeAhead;
 
     // The Lagrange basis over the taps at (whole + first) .. (whole + first + width - 1) samples ago,
     // built from its definition rather than from any expanded form the implementation might use.
