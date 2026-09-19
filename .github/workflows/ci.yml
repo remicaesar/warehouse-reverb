@@ -1,11 +1,24 @@
 name: CI
 
-# branches: ["**"] rather than a bare `push:` -- a bare push trigger also
-# fires on tag refs, which would run this whole matrix a second time on every
-# `v*` tag (release.yml already covers tags, and builds them properly).
+# NOT a bare `push:`, and no longer branches: ["**"].
+#
+# The original reason for naming branches at all still holds: a bare `push:` also fires on tag
+# refs, which would run this whole matrix a second time on every `v*` tag (release.yml already
+# covers tags, and builds them properly). Naming `main` avoids tag refs exactly as `["**"]` did.
+#
+# Why it is `main` and not `["**"]`: with `["**"]`, a push to a branch that has an open PR
+# satisfied BOTH triggers and created two identical matrix runs of the same commit. The
+# concurrency group below cancels the loser, which stopped the wasted compute -- but GitHub keeps
+# the cancelled run's check entries attached to the commit, so the PR merge box read
+# "2 cancelled, 2 successful" and listed the cancelled pair under "2 failing checks". A PR that
+# passes everything should not read as failing.
+#
+# CONSEQUENCE, worth knowing rather than discovering: a branch pushed with NO open PR now gets no
+# CI at all until its PR exists. That is the usual arrangement -- branch builds arrive with the PR
+# -- but it does mean a long-lived branch is unbuilt until someone opens one.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
 
 permissions:
