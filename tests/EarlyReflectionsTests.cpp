@@ -486,7 +486,14 @@ void testSpreadDecorrelates()
 void testSizeSweepIsSmooth()
 {
     constexpr double seconds = 2.0;
-    constexpr float  toneHz  = 100.0f;
+    // `static` is what lets the lambdas below use this without capturing it. MSVC rejects an
+    // implicit read of a non-static constexpr local inside a lambda (C3493); clang and GCC
+    // accept it, and reject the obvious fixes in turn -- an explicit capture draws
+    // -Wunused-lambda-capture and an init-capture draws -Wshadow-uncaptured-local. Static
+    // storage duration sidesteps all three: nothing is captured on any compiler. This file
+    // had never been compiled by MSVC, because the Windows build died at CMake configure
+    // long before reaching a compiler.
+    static constexpr float  toneHz  = 100.0f;
 
     auto sine = [] (Harness& h, int block)
     {
@@ -731,12 +738,19 @@ void testFreezeHoldsLateAtFullErMix()
 {
     constexpr double chargeSeconds = 0.5;
     constexpr double settleSeconds = 0.3;
-    constexpr double totalSeconds  = 4.5;
-    constexpr double probeHz       = 5000.0;
+    // `static` is what lets the lambdas below use this without capturing it. MSVC rejects an
+    // implicit read of a non-static constexpr local inside a lambda (C3493); clang and GCC
+    // accept it, and reject the obvious fixes in turn -- an explicit capture draws
+    // -Wunused-lambda-capture and an init-capture draws -Wshadow-uncaptured-local. Static
+    // storage duration sidesteps all three: nothing is captured on any compiler. This file
+    // had never been compiled by MSVC, because the Windows build died at CMake configure
+    // long before reaching a compiler.
+    static constexpr double totalSeconds  = 4.5;
+    static constexpr double probeHz       = 5000.0;
 
-    constexpr int chargeBlocks  = static_cast<int> (chargeSeconds * testSampleRate
+    static constexpr int chargeBlocks  = static_cast<int> (chargeSeconds * testSampleRate
                                                     / static_cast<double> (testBlockSize));
-    constexpr int divergeBlocks = static_cast<int> ((chargeSeconds + settleSeconds) * testSampleRate
+    static constexpr int divergeBlocks = static_cast<int> ((chargeSeconds + settleSeconds) * testSampleRate
                                                     / static_cast<double> (testBlockSize));
 
     // freezeAfterCharge: engage Freeze once charged. toneAfterSettle: what the input becomes once

@@ -6,7 +6,17 @@ project(Warehouse VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
+
+# FORCE, for the same reason CMAKE_OSX_ARCHITECTURES below carries it, and this one was
+# missed. project() has already created CMAKE_OSX_DEPLOYMENT_TARGET as a cache entry by
+# the time this line runs, so a set(... CACHE ...) WITHOUT FORCE is silently a no-op: the
+# entry stays empty, no -mmacosx-version-min reaches the compiler, and every bundle is
+# stamped with the build machine's SDK version instead of 11.0. Measured before the fix on
+# a macOS 26.5 SDK: `otool -l` reported `minos 26.0` on both slices of a universal build,
+# i.e. a plugin that refuses to load on every macOS this project claims to support. The
+# defect is invisible in the build log and in the source, which is why ci.yml asserts the
+# resulting minos rather than trusting this line.
+set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version" FORCE)
 
 option(UNIVERSAL_BINARY "Build a fat arm64 + x86_64 binary" OFF)
 
@@ -147,16 +157,34 @@ target_link_libraries(Warehouse
 # which invalidates that signature, then re-signs. Verified after a clean build: both installed
 # bundles report "valid on disk" and "satisfies its Designated Requirement" under
 # `codesign --verify --strict`, with moduleinfo.json sealed. The warnings are noise, not damage.
+#
+# GUARDED ON APPLE, NOT ON if(TARGET ...). The target test is true on Windows too -- VST3 and
+# Standalone targets exist there -- and it is the wrong question: what this block needs is not "does
+# the target exist" but "is it a macOS bundle". $<TARGET_BUNDLE_DIR:...> is only valid for bundle
+# targets, so on Windows the guard passed and CMake failed at GENERATE time, before a single file
+# compiled:
+#
+#     CMake Error at CMakeLists.txt:154 (add_custom_command):
+#       Error evaluating generator expression:
+#         $<TARGET_BUNDLE_DIR:Warehouse_VST3>
+#       TARGET_BUNDLE_DIR is allowed only for Bundle targets.
+#     CMake Generate step failed.  Build files cannot be regenerated correctly.
+#
+# That is the whole of the Windows CI failure, and it means the Windows build had never once
+# succeeded. codesign is a macOS tool and this block is macOS-only by nature, so APPLE is both the
+# correct guard and the one that states the intent.
 # --------------------------------------------------------------------------------------------------
 
-foreach(format AU VST3)
-    if(TARGET Warehouse_${format})
-        add_custom_command(TARGET Warehouse_${format} POST_BUILD
-            COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:Warehouse_${format}>"
-            COMMENT "Ad-hoc signing Warehouse ${format}"
-            VERBATIM)
-    endif()
-endforeach()
+if(APPLE)
+    foreach(format AU VST3)
+        if(TARGET Warehouse_${format})
+            add_custom_command(TARGET Warehouse_${format} POST_BUILD
+                COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:Warehouse_${format}>"
+                COMMENT "Ad-hoc signing Warehouse ${format}"
+                VERBATIM)
+        endif()
+    endforeach()
+endif()
 
 # ==================================================================================================
 # Tests

@@ -489,6 +489,214 @@ void testProbesDifferFromDefaults()
                            : std::string ("colliding: ") + colliding);
 }
 
+//==================================================================================================
+// a1 / a2. The SHIPPING DEFAULTS, pinned.
+//
+// WHY THIS EXISTS. A plugin's defaults are the single most product-visible thing it has: they are
+// what every user hears the moment they insert it, before touching a control. Nothing in this suite
+// asserted any of them. Measured: changing Mix 35 -> 90 %, Size 100 -> 10 % and Decay 2.5 -> 20 s in
+// createParameterLayout -- an audibly different plugin on first insert -- left all 121 checks in
+// both suites GREEN. The two existing tests that touch getDefaultValue() read the default FROM the
+// parameter and compare it against behaviour, so they are self-consistent whatever the value is.
+//
+// a2 is the second half, and it closes a hole a literal table alone cannot. The same defaults are
+// stated in three independent places: this layout, ReverbEngine::Params' member initialisers, and
+// the fallback literals in PluginProcessor::currentParameters(). ReverbEngine.h asks the next author
+// to "keep the three in step" -- but a comment does not fail. That mattered concretely: W2b in
+// WetPathTests.cpp is named "and it monos it at the shipping default" and reads
+// ReverbEngine::Params{}.bassMonoHz, because the DSP test target deliberately cannot link
+// juce_audio_processors and so cannot see the layout at all. Measured: changing ONLY the APVTS
+// default 250 -> 130 Hz left all 121 checks green, while 130 Hz measures about -18 dB of side
+// rejection against W2's own -20 dB bar. a2 makes the struct default a legitimate proxy for the
+// shipping one by making disagreement a test failure, which is the guarantee W2b needs and the one
+// thing the layering prevents it from checking itself.
+//==================================================================================================
+struct DefaultExpectation
+{
+    const char* id;
+    float       value;      // denormalised, as the host displays it
+};
+
+// Every parameter in the layout. numParameters is asserted below so a new parameter cannot be added
+// without landing here too.
+constexpr DefaultExpectation shippingDefaults[]
+{
+    { reverb::param::idMix,           35.0f },
+    { reverb::param::idPreDelay,      10.0f },
+    { reverb::param::idSize,         100.0f },
+    { reverb::param::idDecay,          2.5f },
+    { reverb::param::idDamping,     3500.0f },
+    { reverb::param::idLowCut,       250.0f },
+    { reverb::param::idBandwidth,  16000.0f },
+    { reverb::param::idDiffusion,     70.0f },
+    { reverb::param::idModDepth,      25.0f },
+    { reverb::param::idModRate,        0.4f },
+    { reverb::param::idWidth,        100.0f },
+    { reverb::param::idFreeze,         0.0f },
+    { reverb::param::idOutput,         0.0f },
+    { reverb::param::idDecayLow,       1.4f },
+    { reverb::param::idDecayHigh,      0.7f },
+    { reverb::param::idErMix,         25.0f },
+    { reverb::param::idErSize,       100.0f },
+    { reverb::param::idErSpread,      60.0f },
+    { reverb::param::idDensity,       45.0f },
+    { reverb::param::idDuckAmount,     0.0f },
+    { reverb::param::idDuckThresh,   -24.0f },
+    { reverb::param::idDuckRelease,  250.0f },
+    { reverb::param::idDuckChar,       0.0f },   // 0 = Gentle
+    { reverb::param::idPreDelaySync,   0.0f },
+    { reverb::param::idPreDelayDiv,    5.0f },   // index 5 = "1/8"
+    { reverb::param::idBassMono,     250.0f },
+    { reverb::param::idWetLowCut,     20.0f },
+    { reverb::param::idWetHighCut, 20000.0f },
+    { reverb::param::idWetTilt,        0.0f },
+};
+
+static_assert (std::size (shippingDefaults) == static_cast<size_t> (reverb::param::numParameters),
+               "every parameter's shipping default must be pinned here -- a new parameter needs a "
+               "row in shippingDefaults, not just a layout entry");
+
+void testShippingDefaults()
+{
+    ReverbAudioProcessor fresh;
+
+    std::string wrong;
+    int         mismatches = 0;
+
+    for (const auto& expected : shippingDefaults)
+    {
+        auto* parameter = fresh.apvts.getParameter (expected.id);
+
+        if (parameter == nullptr)
+        {
+            if (! wrong.empty()) wrong += " ";
+            wrong += std::string (expected.id) + "(missing)";
+            ++mismatches;
+            continue;
+        }
+
+        const float actual = parameter->convertFrom0to1 (parameter->getDefaultValue());
+
+        // Relative where the value is large (20 kHz round-trips through a 0-1 normalise and comes
+        // back 19999.998), absolute where it is zero.
+        const float tolerance = std::max (1.0e-3f, std::abs (expected.value) * 1.0e-5f);
+
+        if (std::abs (actual - expected.value) > tolerance)
+        {
+            char buffer[96];
+            std::snprintf (buffer, sizeof (buffer), "%s(want %.4g got %.4g)",
+                           expected.id, (double) expected.value, (double) actual);
+
+            if (! wrong.empty()) wrong += " ";
+            wrong += buffer;
+            ++mismatches;
+        }
+    }
+
+    check ("a1. every shipping default is the intended value",
+           mismatches == 0,
+           mismatches == 0
+               ? fmt ("parameters=%.0f all at the pinned default",
+                      static_cast<double> (std::size (shippingDefaults)))
+               : std::string ("wrong: ") + wrong);
+}
+
+void testEngineDefaultsMatchApvts()
+{
+    ReverbAudioProcessor fresh;
+    const reverb::ReverbEngine::Params engineDefaults {};
+
+    // Every ReverbEngine::Params field that a host parameter feeds, paired with that parameter.
+    // Fields with no parameter behind them are deliberately absent. The two bool fields sit in
+    // this table like everything else: a BoolParam's default converts to exactly 0 or 1, which the
+    // tolerance below separates cleanly, so they need no second comparison path -- and when they
+    // had one it compared the struct against itself and never read the layout at all.
+    const std::pair<const char*, float> pairs[]
+    {
+        { reverb::param::idMix,          engineDefaults.mix },
+        { reverb::param::idPreDelay,     engineDefaults.preDelayMs },
+        { reverb::param::idSize,         engineDefaults.size },
+        { reverb::param::idDecay,        engineDefaults.decaySeconds },
+        // idDamping / idLowCut are DELIBERATELY ABSENT, and this is the one exemption in the table.
+        // ReverbEngine::Params keeps dampingHz = 6000 and lowCutHz = 120 while the shipping layout
+        // uses 3500 and 250. That is documented at ReverbEngine.h:52-58: after the D1a fold those
+        // two fields became the Decay EQ's crossovers, and the struct initialisers were left at
+        // their old values on purpose because the frozen stability-sweep numbers snap from a
+        // default-constructed Params on the first setParameters() call. So the divergence is real,
+        // intended, and load-bearing -- listing them here would fail honestly and the only way to
+        // pass would be to change a number the DSP tests are calibrated against. They are named
+        // here rather than silently omitted so the exemption is visible to the next reader.
+        { reverb::param::idBandwidth,    engineDefaults.bandwidthHz },
+        { reverb::param::idDiffusion,    engineDefaults.diffusion },
+        { reverb::param::idModDepth,     engineDefaults.modDepth },
+        { reverb::param::idModRate,      engineDefaults.modRateHz },
+        { reverb::param::idWidth,        engineDefaults.width },
+        { reverb::param::idOutput,       engineDefaults.outputGainDb },
+        { reverb::param::idDecayLow,     engineDefaults.decayLowMult },
+        { reverb::param::idDecayHigh,    engineDefaults.decayHighMult },
+        { reverb::param::idErMix,        engineDefaults.erMix },
+        { reverb::param::idErSize,       engineDefaults.erSizePercent },
+        { reverb::param::idErSpread,     engineDefaults.erSpread },
+        { reverb::param::idDensity,      engineDefaults.density },
+        { reverb::param::idDuckAmount,   engineDefaults.duckAmount },
+        { reverb::param::idDuckThresh,   engineDefaults.duckThresholdDb },
+        { reverb::param::idDuckRelease,  engineDefaults.duckReleaseMs },
+        { reverb::param::idDuckChar,     static_cast<float> (engineDefaults.duckCharacter) },
+        { reverb::param::idPreDelayDiv,  static_cast<float> (engineDefaults.preDelayDivision) },
+        { reverb::param::idBassMono,     engineDefaults.bassMonoHz },
+        { reverb::param::idWetLowCut,    engineDefaults.wetLowCutHz },
+        { reverb::param::idWetHighCut,   engineDefaults.wetHighCutHz },
+        { reverb::param::idWetTilt,      engineDefaults.wetTiltDb },
+        { reverb::param::idFreeze,       static_cast<float> (engineDefaults.freeze) },
+        { reverb::param::idPreDelaySync, static_cast<float> (engineDefaults.preDelaySync) },
+    };
+
+    static_assert (std::size (pairs) == static_cast<size_t> (reverb::param::numParameters) - 2,
+                   "every parameter must be compared against its ReverbEngine::Params field here -- "
+                   "a1 pins the layout value, and without this a new parameter is pinned there "
+                   "while its Params default drifts away unseen. The subtracted 2 is idDamping and "
+                   "idLowCut, the one documented exemption: Params deliberately keeps 6000/120 "
+                   "against the layout's 3500/250 because the frozen stability-sweep numbers snap "
+                   "from a default-constructed Params");
+
+    std::string drifted;
+    int         mismatches = 0;
+
+    for (const auto& [id, engineValue] : pairs)
+    {
+        auto* parameter = fresh.apvts.getParameter (id);
+
+        if (parameter == nullptr)
+        {
+            if (! drifted.empty()) drifted += " ";
+            drifted += std::string (id) + "(missing)";
+            ++mismatches;
+            continue;
+        }
+
+        const float apvtsValue = parameter->convertFrom0to1 (parameter->getDefaultValue());
+        const float tolerance  = std::max (1.0e-3f, std::abs (apvtsValue) * 1.0e-5f);
+
+        if (std::abs (apvtsValue - engineValue) > tolerance)
+        {
+            char buffer[96];
+            std::snprintf (buffer, sizeof (buffer), "%s(apvts %.4g vs Params %.4g)",
+                           id, (double) apvtsValue, (double) engineValue);
+
+            if (! drifted.empty()) drifted += " ";
+            drifted += buffer;
+            ++mismatches;
+        }
+    }
+
+    check ("a2. ReverbEngine::Params defaults match the shipping layout",
+           mismatches == 0,
+           mismatches == 0
+               ? fmt ("fields compared=%.0f all in step with the APVTS default",
+                      static_cast<double> (std::size (pairs)))
+               : std::string ("drifted: ") + drifted);
+}
+
 void testStateRoundTrip()
 {
     ReverbAudioProcessor source;
@@ -971,6 +1179,8 @@ int runProcessorTests()
     std::printf ("--------------------------\n");
 
     testProbesDifferFromDefaults();
+    testShippingDefaults();
+    testEngineDefaultsMatchApvts();
     testPlayheadAndGuiAtomics();
     testStateRoundTrip();
     testMalformedState();

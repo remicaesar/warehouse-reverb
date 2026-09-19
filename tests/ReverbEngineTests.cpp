@@ -119,8 +119,24 @@ void testDelayLineBounds()
         // adds on top of read()'s: its own minimum is 3 rather than 1, and its own maximum is
         // size - 3 rather than size - 2, so read()'s upper bound is now an OVER-long delay that must
         // come back clamped rather than wrapped.
+        // THE LIST AS IT ORIGINALLY STOOD WAS NOT ENOUGH, and the reason is worth stating because
+        // it already looked exhaustive. The float wrap fires only when (writeIndex - delay) is a
+        // TINY NEGATIVE that rounds up to exactly size when size is added, i.e. when the delay sits
+        // a hair ABOVE writeIndex. The `written + 0.0001f` entry below was written for that case and
+        // misses it by exactly one: after the priming loop writeIndex is (written + 1), so that
+        // entry probes a hair above written and leaves (writeIndex - delay) at ~0.9999, safely
+        // positive. Measured on this line size: the float-wrap formulation produces the
+        // out-of-bounds index in 98408 places in the (writeIndex, delay) plane, and the original
+        // list reached exactly 0 of them - so reinstating the bug left this check GREEN while it
+        // blew the tank up to 279 dBFS elsewhere.
+        //
+        // So the list keeps the boundaries it was built for and gains the `written + 1.0001f`
+        // entry, which is the one that lands in the failing region: at writeIndex == written + 1 it
+        // leaves (writeIndex - delay) at -0.0001, exactly the tiny negative that the float wrap
+        // rounds up to size. Reinstating the bug turns this check red on that entry alone.
         for (const float delay : { 0.0f, -1.0f, 0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f, 4.5f,
                                    static_cast<float> (written) + 0.0001f,
+                                   static_cast<float> (written) + 1.0001f,
                                    static_cast<float> (lineSize - 5) + 0.5f,
                                    static_cast<float> (lineSize - 4),
                                    static_cast<float> (lineSize - 4) + 0.5f,
@@ -209,8 +225,15 @@ void testDelayLineLagrangeReference()
         return static_cast<double> (history[history.size() - static_cast<size_t> (j)]);
     };
 
-    constexpr int width = reverb::DelayLineFrac::kernelWidth;
-    constexpr int first = -reverb::DelayLineFrac::lagrangeAhead;
+    // `static` is what lets the lambdas below use this without capturing it. MSVC rejects an
+    // implicit read of a non-static constexpr local inside a lambda (C3493); clang and GCC
+    // accept it, and reject the obvious fixes in turn -- an explicit capture draws
+    // -Wunused-lambda-capture and an init-capture draws -Wshadow-uncaptured-local. Static
+    // storage duration sidesteps all three: nothing is captured on any compiler. This file
+    // had never been compiled by MSVC, because the Windows build died at CMake configure
+    // long before reaching a compiler.
+    static constexpr int width = reverb::DelayLineFrac::kernelWidth;
+    static constexpr int first = -reverb::DelayLineFrac::lagrangeAhead;
 
     // The Lagrange basis over the taps at (whole + first) .. (whole + first + width - 1) samples ago,
     // built from its definition rather than from any expanded form the implementation might use.
@@ -1224,6 +1247,152 @@ void testNonFiniteInput()
 }
 
 //==================================================================================================
+// 8b. The guard-trip counter itself works.
+//
+// WHY THIS EXISTS, because it is not obvious and its absence was invisible. Roughly fifteen
+// assertions in this suite - every stability sweep, every freeze-hold, the decay-EQ sweeps - lean on
+// `h.guardTrips == 0` to distinguish "the tank is stable" from "the tank blew up and the non-finite
+// guard zeroed the evidence before the output". Nothing asserted that the counter can ever be
+// non-zero. Measured: deleting the single line that latches it (`recovered = true` in
+// ReverbEngine::processChunk) left all 102 engine checks GREEN, which means a refactor that broke
+// the latch would silently turn every one of those fifteen assertions vacuous and return the suite
+// to the exact blindness the counter was added to remove.
+//
+// Check 8 above cannot cover this: it feeds non-finite INPUT, which the input sanitiser replaces
+// with 0 before the FDN ever sees it, so the guard correctly never fires there. The poison has to
+// originate INSIDE the feedback loop.
+//
+// How this drives it there without touching production code: a finite but astronomically large
+// input is not sanitised - only non-finite values are - so feeding samples near the top of float's
+// range at the tank's longest decay lets the 16-line sum and the Hadamard mix overflow to infinity
+// within the loop. That is a genuine internal divergence, which is precisely what the guard is for.
+//
+// THREE LEGS, AND THEY ARE NOT EQUALLY STRONG. Which one can actually catch what is worth stating
+// plainly, because two assertions on this branch already turned out to prove nothing.
+//
+//   1. THE GUARD FIRES (h.guardTrips > 0). What intent item 6 asks for, and sound: deleting the
+//      `recovered = true` latch in ReverbEngine::processChunk turns it red.
+//
+//   2. THE SCOPED FINITENESS SCAN (escaped == 0) CANNOT FAIL. It is kept for its scope, not for
+//      its strength, and it is not evidence that the guard contains anything. The branch that
+//      latches the counter also zeroes the whole output block and returns, and one Harness block
+//      is exactly one processChunk here (prepare() sets capacity to max(maxBlockSize, 32) = 512),
+//      so "the guard fired in this block" already implies "this block is all zeros". The scoping
+//      is still right: in a block where the guard does NOT fire the tank output is finite by
+//      definition but may be astronomically large, and WetChain's (l - r) * 0.5f can overflow on
+//      it, so an unconditional scan would depend on FMA contraction and vectorisation -- green
+//      under clang, possibly red under MSVC.
+//
+//   3. THE RECOVERY LEG is the falsifiable one, and it is what actually tests containment. The
+//      guard's documented promise is to "trade one silent block for a full state clear", so once
+//      the drive stops the tank must be clean: silence in, finite out, and no further trips.
+//      DELETING THE reset() CALL FROM THE GUARD BRANCH KILLS THIS LEG -- the tank stays poisoned
+//      and trips on every subsequent silent block.
+//
+//      THE DRIVE STOPS ON AN OBSERVED TRIP, NOT AFTER A FIXED BLOCK COUNT, and that is what makes
+//      this leg's precondition something the test controls. reset() clears every FDN line, and at
+//      Size 200% the shortest line is longer than three blocks, so the tank cannot re-trip on the
+//      very next block: trips come roughly every fourth block, and a fixed-length drive would end
+//      on a trip block only by luck. End it anywhere else and the lines still hold 1e38 content
+//      that the first silent blocks read back, which trips the guard again and reddens this leg
+//      with the engine behaving exactly as designed -- a coin toss that FMA contraction and
+//      vectorisation could flip on the MSVC job. Breaking on the first trip means the silent
+//      phase always starts from a freshly reset tank. Never observing a trip is not a silent
+//      skip: drivenTrips stays 0 and leg 1 fails.
+//
+// `recovered` is cleared at the top of every ReverbEngine::process call, so Harness::guardTrips
+// advancing across a block is exactly "the guard fired in THIS block".
+//==================================================================================================
+void testNonFiniteGuardFires()
+{
+    Harness h (48000.0, 512, 2);
+
+    auto p = measurementParams (30.0f);
+    p.mix  = 100.0f;
+    p.size = 200.0f;
+    h.engine.setParameters (p);
+
+    // Finite, so the input sanitiser passes it through untouched, and large enough that the
+    // feedback sum reaches infinity in a handful of passes.
+    //
+    // ALTERNATING SIGN, NOT A CONSTANT, and the first attempt at this test got it wrong: a constant
+    // +/-1e38 is pure DC, the tank's input DC blocker removes it, and the FDN sees essentially
+    // nothing. The test then reported `guard trips=0` and looked exactly like a working guard that
+    // simply had nothing to catch. Flipping sign every sample puts the whole of that amplitude at
+    // Nyquist, which the DC blocker passes untouched.
+    constexpr float huge = 1.0e38f;
+
+    constexpr int recoveryBlocks = 8;
+
+    int escaped = 0, guardedBlocks = 0;
+
+    for (int b = 0; b < h.blocksFor (2.0); ++b)
+    {
+        for (int n = 0; n < h.blockSize; ++n)
+        {
+            const float s = (n % 2 == 0) ? huge : -huge;
+
+            h.left [static_cast<size_t> (n)] =  s;
+            h.right[static_cast<size_t> (n)] = -s;
+        }
+
+        h.engine.setParameters (p);
+
+        const int tripsBefore = h.guardTrips;
+        h.processBlock();
+
+        if (h.guardTrips == tripsBefore)
+            continue;
+
+        ++guardedBlocks;
+
+        for (int n = 0; n < h.blockSize; ++n)
+        {
+            const auto sn = static_cast<size_t> (n);
+
+            if (! std::isfinite (h.left[sn]))  ++escaped;
+            if (! std::isfinite (h.right[sn])) ++escaped;
+        }
+
+        break;
+    }
+
+    const int drivenTrips = h.guardTrips;
+
+    int recoveryTrips = 0, recoveryEscaped = 0;
+
+    for (int b = 0; b < recoveryBlocks; ++b)
+    {
+        h.fillSilence();
+        h.engine.setParameters (p);
+
+        const int tripsBefore = h.guardTrips;
+        h.processBlock();
+
+        if (h.guardTrips != tripsBefore)
+            ++recoveryTrips;
+
+        for (int n = 0; n < h.blockSize; ++n)
+        {
+            const auto sn = static_cast<size_t> (n);
+
+            if (! std::isfinite (h.left[sn]))  ++recoveryEscaped;
+            if (! std::isfinite (h.right[sn])) ++recoveryEscaped;
+        }
+    }
+
+    check ("8b. the guard fires, and the state clear it promises really recovers the tank",
+           drivenTrips > 0 && escaped == 0 && recoveryTrips == 0 && recoveryEscaped == 0,
+           fmt ("guard trips=%.0f (want > 0)", static_cast<double> (drivenTrips))
+           + fmt ("  non-finite outputs in those %.0f blocks=%.0f (want 0)",
+                  static_cast<double> (guardedBlocks), static_cast<double> (escaped))
+           + fmt ("  trips over %.0f silent blocks after the drive=%.0f (want 0)",
+                  static_cast<double> (recoveryBlocks), static_cast<double> (recoveryTrips))
+           + fmt ("  non-finite outputs there=%.0f (want 0)",
+                  static_cast<double> (recoveryEscaped)));
+}
+
+//==================================================================================================
 // 9. Blocks larger than the prepared size are chunked correctly.
 //
 // ReverbEngine::process splits a request bigger than the prepared maxBlockSize into chunks of that
@@ -1373,6 +1542,7 @@ int runEngineTests()
     testResetClearsTail();
     testMono();
     testNonFiniteInput();
+    testNonFiniteGuardFires();
     testChunkedProcessing();
     reportCpu();
 

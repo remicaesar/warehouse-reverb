@@ -461,13 +461,15 @@ GUI dependency. It exercises `ReverbEngine` directly: delay-line bounds, silence
 bit-transparency at Mix = 0, RT60 accuracy via Schroeder integration, a 30 s randomised stability
 sweep at all four sample rates, a pinned worst-case corner, Freeze hold under both open and dark
 filter settings, Freeze rejecting new input, `reset()`, the mono path, non-finite input containment,
-and the oversized-block chunking path. It also prints CPU time per block.
+the non-finite guard itself firing and clearing the tank it poisoned, and the oversized-block
+chunking path. It also prints CPU time per block.
 
 `WarehouseProcessorTests` compiles the processor itself and covers the layer the DSP suite cannot
-reach: the 13-parameter state round trip, malformed state being ignored, editor-size persistence,
-the sixteen programs and their persistence, bus-layout negotiation including 1→2, oversized blocks
-through `processBlock`, two independent instances, a sample-rate change mid-session, and the tail
-length reported to the host.
+reach: every shipping default pinned to the value the tables above promise, `ReverbEngine::Params`'
+own defaults held in step with that parameter layout, the 13-parameter state round trip, malformed
+state being ignored, editor-size persistence, the sixteen programs and their persistence, bus-layout
+negotiation including 1→2, oversized blocks through `processBlock`, two independent instances, a
+sample-rate change mid-session, and the tail length reported to the host.
 
 `REVERB_SWEEP_SEEDS=96` runs a deeper version of the stability sweep. A single seed is weak
 evidence: a marginally unstable FDN diverges on some parameter trajectories and not others.
