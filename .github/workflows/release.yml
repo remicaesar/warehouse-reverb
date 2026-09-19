@@ -37,8 +37,17 @@ jobs:
             -DUNIVERSAL_BINARY=ON \
             -DWAREHOUSE_INSTALL_AFTER_BUILD=OFF
 
+      # Named targets, for the reason recorded in ci.yml's Build step: a bare `cmake --build`
+      # compiles all 12 targets and the macOS universal build never finished. This list is what the
+      # later steps of THIS job invoke:
+      #   Warehouse_AU, Warehouse_VST3  -> the minos assertion, packaging/build-pkg.sh (it reads
+      #                                    Warehouse_artefacts/Release/{AU,VST3}), and the zip
+      #   WarehouseTests, WarehouseProcessorTests, WarehouseVst3Check -> the Run tests step
       - name: Build
-        run: cmake --build build --config Release --parallel
+        run: |
+          cmake --build build --config Release --parallel \
+            --target Warehouse_AU Warehouse_VST3 \
+                     WarehouseTests WarehouseProcessorTests WarehouseVst3Check
 
       # The same assertion ci.yml carries, run from the same script, and it matters more here:
       # this is the job whose output strangers download. The x86_64 slice exists precisely to
@@ -231,8 +240,17 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -A x64 -DWAREHOUSE_INSTALL_AFTER_BUILD=OFF
 
+      # Named targets. Warehouse_VST3 feeds both packaging/windows/installer.iss and the zip step;
+      # the two test binaries are run directly.
+      #
+      # WarehouseVst3Check is NOT built here, and that is deliberate rather than an oversight: this
+      # job never invokes it. ci.yml's Windows job does run it, so it builds it. Stated explicitly
+      # because a target missing from this list shows up as a "no such file" in whichever step runs
+      # it, not as a build error.
+      #
+      # One line: the default shell here is pwsh (see the Configure step above).
       - name: Build
-        run: cmake --build build --config Release --parallel
+        run: cmake --build build --config Release --parallel --target Warehouse_VST3 WarehouseTests WarehouseProcessorTests
 
       - name: Run tests
         shell: pwsh

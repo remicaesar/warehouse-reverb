@@ -11,6 +11,19 @@ on:
 permissions:
   contents: read
 
+# One run per branch, not two. This workflow triggers on BOTH push and pull_request, so every push
+# to a branch with an open PR started two identical matrix runs that then competed for the same
+# runners -- which on macOS meant two multi-hour universal builds of the same commit at once.
+#
+# The key is `github.head_ref || github.ref_name`, NOT `github.ref`. On a pull_request event
+# github.ref is refs/pull/<n>/merge while on a push it is refs/heads/<branch>, so keying on it
+# would put the two events in DIFFERENT groups and cancel nothing -- which is the whole problem.
+# head_ref is set only on pull_request and is the branch name; ref_name on a push is the same
+# branch name, so the two events land in one group and the older run is cancelled.
+concurrency:
+  group: ci-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     name: ${{ matrix.name }}
@@ -75,8 +88,37 @@ jobs:
         if: runner.os == 'Windows'
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -A x64 -DWAREHOUSE_INSTALL_AFTER_BUILD=OFF
 
-      - name: Build
-        run: cmake --build build --config Release --parallel
+      # NAMED TARGETS, not a bare `cmake --build`. Without --target CMake builds all 12 targets,
+      # and six of them are separate juce_add_console_app targets that each compile their OWN full
+      # copy of the JUCE modules plus the plugin sources -- doubled again by UNIVERSAL_BINARY on
+      # macOS, on a 3-core runner, with no compiler cache. That is why the macOS job had NEVER once
+      # finished its build step in this repository's history: every macOS run before this one was
+      # cancelled or still compiling hours later, including the v1.0.0 release run.
+      #
+      # The list below is what the LATER STEPS OF THIS JOB actually invoke, read off those steps
+      # rather than guessed:
+      #   Warehouse_AU, Warehouse_VST3  -> the minos assertion, and the bundle WarehouseVst3Check hosts
+      #   WarehouseTests, WarehouseProcessorTests, WarehouseVst3Check -> run directly
+      #
+      # Deliberately NOT built here, because nothing in either workflow invokes them:
+      # Warehouse_Standalone, WarehouseSnapshot, WarehouseCaptureState, WarehouseRender. They are
+      # developer tools. If a later step ever needs one, add it here -- the symptom of a missing
+      # target is a "no such file" at the step that runs it, not a build error.
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cmake --build build --config Release --parallel \
+            --target Warehouse_AU Warehouse_VST3 \
+                     WarehouseTests WarehouseProcessorTests WarehouseVst3Check
+
+      # No Warehouse_AU: JUCE only creates that target on Apple, so naming it here would fail with
+      # "no rule to make target" rather than skipping.
+      # One line on purpose: the default shell on windows-latest is pwsh, where `^` is not a line
+      # continuation (that is cmd) and `\` is not either (that is bash). The existing Windows
+      # Configure step above is one line for the same reason.
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: cmake --build build --config Release --parallel --target Warehouse_VST3 WarehouseTests WarehouseProcessorTests WarehouseVst3Check
 
       # Why this is asserted rather than trusted, and why it reads the Mach-O rather than the
       # source, is recorded in the script -- which release.yml runs too, so the check cannot drift
